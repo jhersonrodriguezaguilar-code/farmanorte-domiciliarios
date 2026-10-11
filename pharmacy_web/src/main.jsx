@@ -103,7 +103,19 @@ function normalizeAuthIdentifier(value) {
   return normalized.includes('@') ? normalized : `${normalized}@farmanorte.local`;
 }
 
-function BrandLogo() {
+function BrandLogo({ inverse = false }) {
+  if (inverse) {
+    return (
+      <div className="brand-logo-inverse" role="img" aria-label="FarmaNorte">
+        <svg viewBox="0 0 44 44" aria-hidden="true">
+          <circle cx="22" cy="22" r="18.5" fill="none" stroke="currentColor" strokeWidth="2.8" />
+          <path d="M15 30V14.5h15M15 21.5h11" fill="none" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <span>Farmanorte</span>
+      </div>
+    );
+  }
+
   return <img className="brand-logo" src={`${import.meta.env.BASE_URL}farmanorte-logo.png`} alt="FarmaNorte" />;
 }
 
@@ -149,7 +161,7 @@ function LoginHeroCopy() {
           timer = window.setTimeout(tick, 260);
           return;
         }
-        timer = window.setTimeout(tick, 56);
+        timer = window.setTimeout(tick, 105);
         return;
       }
 
@@ -161,34 +173,19 @@ function LoginHeroCopy() {
           timer = window.setTimeout(tick, 2200);
           return;
         }
-        timer = window.setTimeout(tick, 25);
+        timer = window.setTimeout(tick, 48);
         return;
       }
 
       if (phase === 'hold') {
-        phase = 'delete-copy';
-        timer = window.setTimeout(tick, 30);
-        return;
-      }
-
-      if (phase === 'delete-copy') {
-        copyIndex = Math.max(copyIndex - 1, 0);
-        setVisibleCopy(HERO_COPY.slice(0, copyIndex));
-        if (copyIndex === 0) {
-          phase = 'delete-title';
-        }
-        timer = window.setTimeout(tick, 20);
-        return;
-      }
-
-      titleIndex = Math.max(titleIndex - 1, 0);
-      setVisibleTitle(HERO_TITLE.slice(0, titleIndex));
-      if (titleIndex === 0) {
+        setVisibleCopy('');
+        setVisibleTitle('');
+        copyIndex = 0;
+        titleIndex = 0;
         phase = 'title';
         timer = window.setTimeout(tick, 620);
         return;
       }
-      timer = window.setTimeout(tick, 34);
     };
 
     timer = window.setTimeout(tick, 520);
@@ -237,6 +234,24 @@ function LoginRouteMotion() {
         <span className="hero-route-runner" ref={routeRef} />
       </div>
       <span className="hero-route-label">RUTA ACTIVA · EN VIVO</span>
+    </div>
+  );
+}
+
+function LoginFormAtmosphere({ orbitRef, glowRef }) {
+  return (
+    <div className="login-atmosphere" aria-hidden="true">
+      <div className="login-atmosphere-glow" ref={glowRef} />
+      <div className="login-atmosphere-orbit" ref={orbitRef}>
+        <span className="atmosphere-ring ring-one" />
+        <span className="atmosphere-ring ring-two" />
+        <span className="atmosphere-ring ring-three" />
+        <span className="atmosphere-core" />
+      </div>
+      <span className="atmosphere-star star-one" />
+      <span className="atmosphere-star star-two" />
+      <span className="atmosphere-star star-three" />
+      <span className="atmosphere-star star-four" />
     </div>
   );
 }
@@ -884,6 +899,41 @@ function LoginScreen() {
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const atmosphereOrbitRef = useRef(null);
+  const atmosphereGlowRef = useRef(null);
+  const atmosphereFrameRef = useRef(null);
+  const atmospherePointerRef = useRef({ x: 0, y: 0 });
+
+  const moveAtmosphere = (event) => {
+    const card = event.currentTarget;
+    const bounds = card.getBoundingClientRect();
+    atmospherePointerRef.current = {
+      x: ((event.clientX - bounds.left) / bounds.width - 0.5) * 2,
+      y: ((event.clientY - bounds.top) / bounds.height - 0.5) * 2,
+    };
+    if (atmosphereFrameRef.current !== null) return;
+    atmosphereFrameRef.current = window.requestAnimationFrame(() => {
+      atmosphereFrameRef.current = null;
+      const { x, y } = atmospherePointerRef.current;
+      if (atmosphereOrbitRef.current) {
+        atmosphereOrbitRef.current.style.transform = `translate3d(${x * 14}px, ${y * 10}px, 0)`;
+      }
+      if (atmosphereGlowRef.current) {
+        atmosphereGlowRef.current.style.transform = `translate3d(${x * -10}px, ${y * -8}px, 0)`;
+      }
+    });
+  };
+
+  const resetAtmosphere = () => {
+    if (atmosphereFrameRef.current !== null) {
+      window.cancelAnimationFrame(atmosphereFrameRef.current);
+      atmosphereFrameRef.current = null;
+    }
+    if (atmosphereOrbitRef.current) atmosphereOrbitRef.current.style.transform = 'translate3d(0, 0, 0)';
+    if (atmosphereGlowRef.current) atmosphereGlowRef.current.style.transform = 'translate3d(0, 0, 0)';
+  };
+
+  useEffect(() => () => resetAtmosphere(), []);
 
   const submit = async (event) => {
     event.preventDefault();
@@ -894,7 +944,7 @@ function LoginScreen() {
     setSubmitting(false);
   };
 
-  return <div className="auth-page"><div className="auth-aside"><div className="brand-lockup"><BrandLogo /></div><div className="auth-quote"><LoginHeroCopy /><LoginRouteMotion /></div><div className="auth-aside-footer">Panel privado para personal autorizado</div></div><main className="auth-main"><div className="auth-form-wrap"><span className="section-kicker">Acceso de farmacia</span><h2>Inicia sesión</h2><p className="auth-copy">Usa el usuario que el administrador creó para tu farmacia.</p>{error && <div className="inline-alert error-alert" role="alert">{error}</div>}<form onSubmit={submit} className="auth-form"><Field label="Usuario o correo" required><input type="text" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="juan.perez" autoComplete="username" required /></Field><Field label="Contraseña" required><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" autoComplete="current-password" required /></Field><button className="primary-button full-width" disabled={submitting}>{submitting ? 'Validando…' : 'Entrar al panel'} <span>→</span></button></form><div className="auth-note"><span>●</span> Autenticación protegida por Supabase Auth</div></div></main></div>;
+  return <div className="auth-page"><div className="auth-aside"><div className="brand-lockup"><BrandLogo inverse /></div><div className="auth-quote"><LoginHeroCopy /><LoginRouteMotion /></div><div className="auth-aside-footer">Panel privado para personal autorizado</div></div><main className="auth-main"><div className="auth-form-wrap" onPointerMove={moveAtmosphere} onPointerLeave={resetAtmosphere}><LoginFormAtmosphere orbitRef={atmosphereOrbitRef} glowRef={atmosphereGlowRef} /><span className="section-kicker">Acceso de farmacia</span><h2>Inicia sesión</h2><p className="auth-copy">Usa el usuario que el administrador creó para tu farmacia.</p>{error && <div className="inline-alert error-alert" role="alert">{error}</div>}<form onSubmit={submit} className="auth-form"><Field label="Usuario o correo" required><input type="text" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="juan.perez" autoComplete="username" required /></Field><Field label="Contraseña" required><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" autoComplete="current-password" required /></Field><button className="primary-button full-width" disabled={submitting}>{submitting ? 'Validando…' : 'Entrar al panel'} <span>→</span></button></form><div className="auth-note"><span>●</span> Autenticación protegida por Supabase Auth</div></div></main></div>;
 }
 
 function ConfigScreen() {
