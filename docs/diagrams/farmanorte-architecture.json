@@ -1,0 +1,26 @@
+{
+  "title": "FarmaNorte · Arquitectura etapa 1",
+  "direction": "LR",
+  "groups": [
+    {"label": "Usuarios y canales", "nodes": ["pharmacy", "courier_android", "courier_ios", "admin"]},
+    {"label": "Backend operativo", "nodes": ["supabase"]},
+    {"label": "Registro y tiempo real", "nodes": ["deliveries", "audit"]}
+  ],
+  "nodes": [
+    {"id": "pharmacy", "label": "Página farmacia\nFN 155"},
+    {"id": "courier_android", "label": "Domiciliario\nAPK Android"},
+    {"id": "courier_ios", "label": "Domiciliario\nPWA iPhone"},
+    {"id": "admin", "label": "Administrador\nPanel operativo"},
+    {"id": "supabase", "label": "Supabase\nAuth · API · Realtime"},
+    {"id": "deliveries", "label": "Domicilios\nEstados y zonas"},
+    {"id": "audit", "label": "Auditoría\nEventos y presencia"}
+  ],
+  "edges": [
+    {"from": "pharmacy", "to": "supabase", "label": "publica / edita"},
+    {"from": "courier_android", "to": "supabase", "label": "acepta / actualiza"},
+    {"from": "courier_ios", "to": "supabase", "label": "acepta / actualiza"},
+    {"from": "admin", "to": "supabase", "label": "administra"},
+    {"from": "supabase", "to": "deliveries", "label": "Realtime"},
+    {"from": "supabase", "to": "audit", "label": "registra todo"}
+  ]
+}

@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FarmaNorte · Arquitectura etapa 1</title>
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #1f1f1f; color: #f8f9fa; }
+    .card { margin: 32px auto; max-width: min(1120px, calc(100vw - 32px)); border: 1px solid #3d3d3d; border-radius: 8px; overflow: hidden; background: #2a2a2a; box-shadow: 0 18px 60px rgba(0,0,0,.28); }
+    header { min-height: 54px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 16px; border-bottom: 1px solid #3d3d3d; }
+    .brand { display: flex; gap: 10px; align-items: center; font-weight: 650; white-space: nowrap; }
+    .mark { width: 18px; height: 18px; border-radius: 5px; background: #6965db; display: inline-grid; place-items: center; color: white; font-size: 13px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    a, button { border: 1px solid #d8d8d8; border-radius: 7px; background: #ffffff; color: #1e1e1e; padding: 8px 11px; text-decoration: none; font-size: 14px; cursor: pointer; }
+    button[disabled] { opacity: .68; cursor: wait; }
+    main { background: #ffffff; overflow: auto; }
+    .canvas { min-width: max-content; padding: 20px; }
+    .note { color: #adb5bd; font-size: 13px; padding: 0 16px 16px; line-height: 1.45; }
+  </style>
+</head>
+<body>
+  <section class="card">
+    <header>
+      <div class="brand"><span class="mark">E</span><span>Excalidraw</span></div>
+      <div class="actions">
+        <a href="farmanorte-architecture.excalidraw" download>Download .excalidraw</a>
+        <button id="open-web" type="button">Open in Excalidraw</button>
+      </div>
+    </header>
+    <main><div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" width="2420" height="380" viewBox="0 0 2420 380">
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#1e1e1e"/></marker><filter id="shadow" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.14"/></filter></defs>
+<rect width="100%" height="100%" fill="#ffffff"/>
+<text x="80" y="64" font-family="Inter, Arial, sans-serif" font-size="30" font-weight="700" fill="#1e1e1e">FarmaNorte · Arquitectura etapa 1</text>
+<rect x="48" y="76" width="1304" height="182" rx="10" fill="none" stroke="#adb5bd" stroke-width="1.5" stroke-dasharray="7 7"/>
+<text x="62" y="104" font-family="Inter, Arial, sans-serif" font-size="16" fill="#495057">Usuarios y canales</text>
+<rect x="1408" y="76" width="284" height="182" rx="10" fill="none" stroke="#adb5bd" stroke-width="1.5" stroke-dasharray="7 7"/>
+<text x="1422" y="104" font-family="Inter, Arial, sans-serif" font-size="16" fill="#495057">Backend operativo</text>
+<rect x="1748" y="76" width="624" height="182" rx="10" fill="none" stroke="#adb5bd" stroke-width="1.5" stroke-dasharray="7 7"/>
+<text x="1762" y="104" font-family="Inter, Arial, sans-serif" font-size="16" fill="#495057">Registro y tiempo real</text>
+<line x1="300" y1="174.0" x2="1440" y2="174.0" stroke="#1e1e1e" stroke-width="2.2" marker-end="url(#arrow)"/>
+<rect x="808.0" y="138.0" width="124" height="28" rx="5" fill="#ffffff" stroke="#dee2e6"/>
+<text x="870.0" y="158.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="13" fill="#495057">publica / edita</text>
+<line x1="640" y1="174.0" x2="1440" y2="174.0" stroke="#1e1e1e" stroke-width="2.2" marker-end="url(#arrow)"/>
+<rect x="978.0" y="138.0" width="124" height="28" rx="5" fill="#ffffff" stroke="#dee2e6"/>
+<text x="1040.0" y="158.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="13" fill="#495057">acepta / actualiza</text>
+<line x1="980" y1="174.0" x2="1440" y2="174.0" stroke="#1e1e1e" stroke-width="2.2" marker-end="url(#arrow)"/>
+<rect x="1148.0" y="138.0" width="124" height="28" rx="5" fill="#ffffff" stroke="#dee2e6"/>
+<text x="1210.0" y="158.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="13" fill="#495057">acepta / actualiza</text>
+<line x1="1320" y1="174.0" x2="1440" y2="174.0" stroke="#1e1e1e" stroke-width="2.2" marker-end="url(#arrow)"/>
+<rect x="1318.0" y="138.0" width="124" height="28" rx="5" fill="#ffffff" stroke="#dee2e6"/>
+<text x="1380.0" y="158.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="13" fill="#495057">administra</text>
+<line x1="1660" y1="174.0" x2="1780" y2="174.0" stroke="#1e1e1e" stroke-width="2.2" marker-end="url(#arrow)"/>
+<rect x="1658.0" y="138.0" width="124" height="28" rx="5" fill="#ffffff" stroke="#dee2e6"/>
+<text x="1720.0" y="158.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="13" fill="#495057">Realtime</text>
+<line x1="1660" y1="174.0" x2="2120" y2="174.0" stroke="#1e1e1e" stroke-width="2.2" marker-end="url(#arrow)"/>
+<rect x="1828.0" y="138.0" width="124" height="28" rx="5" fill="#ffffff" stroke="#dee2e6"/>
+<text x="1890.0" y="158.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="13" fill="#495057">registra todo</text>
+<rect x="80" y="130" width="220" height="88" rx="12" fill="#e7f5ff" stroke="#1971c2" stroke-width="2.5" filter="url(#shadow)"/>
+<text x="190.0" y="170.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">Página farmacia FN</text>
+<text x="190.0" y="192.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">155</text>
+<rect x="420" y="130" width="220" height="88" rx="12" fill="#f8f9fa" stroke="#1e1e1e" stroke-width="2.5" filter="url(#shadow)"/>
+<text x="530.0" y="170.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">Domiciliario APK</text>
+<text x="530.0" y="192.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">Android</text>
+<rect x="760" y="130" width="220" height="88" rx="12" fill="#f8f9fa" stroke="#1e1e1e" stroke-width="2.5" filter="url(#shadow)"/>
+<text x="870.0" y="170.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">Domiciliario PWA</text>
+<text x="870.0" y="192.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">iPhone</text>
+<rect x="1100" y="130" width="220" height="88" rx="12" fill="#f8f9fa" stroke="#1e1e1e" stroke-width="2.5" filter="url(#shadow)"/>
+<text x="1210.0" y="170.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">Administrador</text>
+<text x="1210.0" y="192.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">Panel operativo</text>
+<rect x="1440" y="130" width="220" height="88" rx="12" fill="#f8f9fa" stroke="#1e1e1e" stroke-width="2.5" filter="url(#shadow)"/>
+<text x="1550.0" y="170.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">Supabase Auth ·</text>
+<text x="1550.0" y="192.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">API · Realtime</text>
+<rect x="1780" y="130" width="220" height="88" rx="12" fill="#f8f9fa" stroke="#1e1e1e" stroke-width="2.5" filter="url(#shadow)"/>
+<text x="1890.0" y="170.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">Domicilios Estados</text>
+<text x="1890.0" y="192.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">y zonas</text>
+<rect x="2120" y="130" width="220" height="88" rx="12" fill="#f8f9fa" stroke="#1e1e1e" stroke-width="2.5" filter="url(#shadow)"/>
+<text x="2230.0" y="170.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">Auditoría Eventos</text>
+<text x="2230.0" y="192.0" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="600" fill="#1e1e1e">y presencia</text>
+</svg></div></main>
+    <div class="note" id="note">Preview is local. Click Open in Excalidraw only when you want to upload an encrypted copy and edit it on the web.</div>
+  </section>
+  <script>
+    const SCENE = {"type": "excalidraw", "version": 2, "source": "https://excalidraw.com", "elements": [{"id": "text_8a2a36146832", "type": "text", "x": 80, "y": 48, "width": 520, "height": 70.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1084486139, "version": 1, "versionNonce": 225294270, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 28, "fontFamily": 1, "text": "FarmaNorte ·\nArquitectura etapa 1", "textAlign": "left", "verticalAlign": "middle", "containerId": null, "originalText": "FarmaNorte · Arquitectura etapa 1", "autoResize": false, "lineHeight": 1.25}, {"id": "rectangle_6c568814127f", "type": "rectangle", "x": 48, "y": 82, "width": 1304, "height": 168, "angle": 0, "strokeColor": "#adb5bd", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "dashed", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 2044837740, "version": 1, "versionNonce": 984304430, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false}, {"id": "text_66ac5ac2d094", "type": "text", "x": 60, "y": 92, "width": 1280, "height": 20.0, "angle": 0, "strokeColor": "#495057", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1048789325, "version": 1, "versionNonce": 125352191, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 16, "fontFamily": 1, "text": "Usuarios y canales", "textAlign": "left", "verticalAlign": "middle", "containerId": null, "originalText": "Usuarios y canales", "autoResize": false, "lineHeight": 1.25}, {"id": "rectangle_e58229ba5aa6", "type": "rectangle", "x": 1408, "y": 82, "width": 284, "height": 168, "angle": 0, "strokeColor": "#adb5bd", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "dashed", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1351325819, "version": 1, "versionNonce": 1472534286, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false}, {"id": "text_22eaa6207dbe", "type": "text", "x": 1420, "y": 92, "width": 260, "height": 20.0, "angle": 0, "strokeColor": "#495057", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 2018384738, "version": 1, "versionNonce": 931759417, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 16, "fontFamily": 1, "text": "Backend operativo", "textAlign": "left", "verticalAlign": "middle", "containerId": null, "originalText": "Backend operativo", "autoResize": false, "lineHeight": 1.25}, {"id": "rectangle_943118f6dfbe", "type": "rectangle", "x": 1748, "y": 82, "width": 624, "height": 168, "angle": 0, "strokeColor": "#adb5bd", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 1, "strokeStyle": "dashed", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 971747659, "version": 1, "versionNonce": 634382614, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false}, {"id": "text_2f58a8b3aa3d", "type": "text", "x": 1760, "y": 92, "width": 600, "height": 40.0, "angle": 0, "strokeColor": "#495057", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1660912628, "version": 1, "versionNonce": 2130318597, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 16, "fontFamily": 1, "text": "Registro y tiempo\nreal", "textAlign": "left", "verticalAlign": "middle", "containerId": null, "originalText": "Registro y tiempo real", "autoResize": false, "lineHeight": 1.25}, {"id": "rectangle_7b3afaf65701", "type": "rectangle", "x": 80, "y": 130, "width": 220, "height": 88, "angle": 0, "strokeColor": "#1971c2", "backgroundColor": "#e7f5ff", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 2086796885, "version": 1, "versionNonce": 159366077, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false}, {"id": "text_f8c4e759728c", "type": "text", "x": 96, "y": 154, "width": 188, "height": 50.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 131780512, "version": 1, "versionNonce": 655665286, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 20, "fontFamily": 1, "text": "Página farmacia FN\n155", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "Página farmacia\nFN 155", "autoResize": false, "lineHeight": 1.25}, {"id": "rectangle_c4b86e4304df", "type": "rectangle", "x": 420, "y": 130, "width": 220, "height": 88, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "#f8f9fa", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1668171701, "version": 1, "versionNonce": 1345310886, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false}, {"id": "text_d8313326c542", "type": "text", "x": 436, "y": 154, "width": 188, "height": 50.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1574571605, "version": 1, "versionNonce": 1935097748, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 20, "fontFamily": 1, "text": "Domiciliario APK\nAndroid", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "Domiciliario\nAPK Android", "autoResize": false, "lineHeight": 1.25}, {"id": "rectangle_3b50d01b8629", "type": "rectangle", "x": 760, "y": 130, "width": 220, "height": 88, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "#f8f9fa", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1469175077, "version": 1, "versionNonce": 1174899680, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false}, {"id": "text_405be23f23c6", "type": "text", "x": 776, "y": 154, "width": 188, "height": 50.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 995227293, "version": 1, "versionNonce": 1874544363, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 20, "fontFamily": 1, "text": "Domiciliario PWA\niPhone", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "Domiciliario\nPWA iPhone", "autoResize": false, "lineHeight": 1.25}, {"id": "rectangle_8fd6e5e90837", "type": "rectangle", "x": 1100, "y": 130, "width": 220, "height": 88, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "#f8f9fa", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 321976431, "version": 1, "versionNonce": 653608978, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false}, {"id": "text_d9b7d0dea222", "type": "text", "x": 1116, "y": 154, "width": 188, "height": 50.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1979858485, "version": 1, "versionNonce": 1972609334, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 20, "fontFamily": 1, "text": "Administrador Panel\noperativo", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "Administrador\nPanel operativo", "autoResize": false, "lineHeight": 1.25}, {"id": "rectangle_a6c3db4d3765", "type": "rectangle", "x": 1440, "y": 130, "width": 220, "height": 88, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "#f8f9fa", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 201204913, "version": 1, "versionNonce": 252456532, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false}, {"id": "text_86bd0ecb5aa0", "type": "text", "x": 1456, "y": 154, "width": 188, "height": 50.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 619536097, "version": 1, "versionNonce": 2110507256, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 20, "fontFamily": 1, "text": "Supabase Auth · API\n· Realtime", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "Supabase\nAuth · API · Realtime", "autoResize": false, "lineHeight": 1.25}, {"id": "rectangle_fd6c0e64814a", "type": "rectangle", "x": 1780, "y": 130, "width": 220, "height": 88, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "#f8f9fa", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 177939520, "version": 1, "versionNonce": 1934093812, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false}, {"id": "text_86638cf0a1d1", "type": "text", "x": 1796, "y": 154, "width": 188, "height": 50.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1857161424, "version": 1, "versionNonce": 560348470, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 20, "fontFamily": 1, "text": "Domicilios Estados y\nzonas", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "Domicilios\nEstados y zonas", "autoResize": false, "lineHeight": 1.25}, {"id": "rectangle_42699391c7d8", "type": "rectangle", "x": 2120, "y": 130, "width": 220, "height": 88, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "#f8f9fa", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 296207734, "version": 1, "versionNonce": 1204850126, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false}, {"id": "text_b5cb56455cfc", "type": "text", "x": 2136, "y": 154, "width": 188, "height": 50.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 709839650, "version": 1, "versionNonce": 1959493997, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 20, "fontFamily": 1, "text": "Auditoría Eventos y\npresencia", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "Auditoría\nEventos y presencia", "autoResize": false, "lineHeight": 1.25}, {"id": "arrow_e99993e68c25", "type": "arrow", "x": 300, "y": 174.0, "width": 1140, "height": 0.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1028739582, "version": 1, "versionNonce": 521488824, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "points": [[0, 0], [1140, 0.0]], "lastCommittedPoint": null, "startBinding": null, "endBinding": null, "startArrowhead": null, "endArrowhead": "arrow"}, {"id": "text_1c59a2f7986c", "type": "text", "x": 800.0, "y": 144.0, "width": 170, "height": 22.5, "angle": 0, "strokeColor": "#495057", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1255952081, "version": 1, "versionNonce": 1687189611, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 18, "fontFamily": 1, "text": "publica / edita", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "publica / edita", "autoResize": false, "lineHeight": 1.25}, {"id": "arrow_7c8c8fdca176", "type": "arrow", "x": 640, "y": 174.0, "width": 800, "height": 0.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1653084240, "version": 1, "versionNonce": 212494974, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "points": [[0, 0], [800, 0.0]], "lastCommittedPoint": null, "startBinding": null, "endBinding": null, "startArrowhead": null, "endArrowhead": "arrow"}, {"id": "text_8e5b6364caab", "type": "text", "x": 970.0, "y": 144.0, "width": 170, "height": 22.5, "angle": 0, "strokeColor": "#495057", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1736742847, "version": 1, "versionNonce": 1123285154, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 18, "fontFamily": 1, "text": "acepta / actualiza", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "acepta / actualiza", "autoResize": false, "lineHeight": 1.25}, {"id": "arrow_b3b9c7f7a076", "type": "arrow", "x": 980, "y": 174.0, "width": 460, "height": 0.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 814509121, "version": 1, "versionNonce": 1374001853, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "points": [[0, 0], [460, 0.0]], "lastCommittedPoint": null, "startBinding": null, "endBinding": null, "startArrowhead": null, "endArrowhead": "arrow"}, {"id": "text_b5550b1b6b22", "type": "text", "x": 1140.0, "y": 144.0, "width": 170, "height": 22.5, "angle": 0, "strokeColor": "#495057", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1468461846, "version": 1, "versionNonce": 2080297738, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 18, "fontFamily": 1, "text": "acepta / actualiza", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "acepta / actualiza", "autoResize": false, "lineHeight": 1.25}, {"id": "arrow_f95c15ce0882", "type": "arrow", "x": 1320, "y": 174.0, "width": 120, "height": 0.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1996283023, "version": 1, "versionNonce": 2106887572, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "points": [[0, 0], [120, 0.0]], "lastCommittedPoint": null, "startBinding": null, "endBinding": null, "startArrowhead": null, "endArrowhead": "arrow"}, {"id": "text_7e7b8ef4f11e", "type": "text", "x": 1310.0, "y": 144.0, "width": 170, "height": 22.5, "angle": 0, "strokeColor": "#495057", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1577011631, "version": 1, "versionNonce": 1663422473, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 18, "fontFamily": 1, "text": "administra", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "administra", "autoResize": false, "lineHeight": 1.25}, {"id": "arrow_7894fcf7cc62", "type": "arrow", "x": 1660, "y": 174.0, "width": 120, "height": 0.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1149248178, "version": 1, "versionNonce": 1658016167, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "points": [[0, 0], [120, 0.0]], "lastCommittedPoint": null, "startBinding": null, "endBinding": null, "startArrowhead": null, "endArrowhead": "arrow"}, {"id": "text_63263e1e807e", "type": "text", "x": 1650.0, "y": 144.0, "width": 170, "height": 22.5, "angle": 0, "strokeColor": "#495057", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 702651196, "version": 1, "versionNonce": 980046799, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 18, "fontFamily": 1, "text": "Realtime", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "Realtime", "autoResize": false, "lineHeight": 1.25}, {"id": "arrow_8e3e261e7f1a", "type": "arrow", "x": 1660, "y": 174.0, "width": 460, "height": 0.0, "angle": 0, "strokeColor": "#1e1e1e", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 666624182, "version": 1, "versionNonce": 573140689, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "points": [[0, 0], [460, 0.0]], "lastCommittedPoint": null, "startBinding": null, "endBinding": null, "startArrowhead": null, "endArrowhead": "arrow"}, {"id": "text_87485352c9df", "type": "text", "x": 1820.0, "y": 144.0, "width": 170, "height": 22.5, "angle": 0, "strokeColor": "#495057", "backgroundColor": "transparent", "fillStyle": "solid", "strokeWidth": 2, "strokeStyle": "solid", "roughness": 1, "opacity": 100, "groupIds": [], "frameId": null, "roundness": {"type": 3}, "seed": 1324616325, "version": 1, "versionNonce": 1944991032, "isDeleted": false, "boundElements": null, "updated": 1, "link": null, "locked": false, "fontSize": 18, "fontFamily": 1, "text": "registra todo", "textAlign": "center", "verticalAlign": "middle", "containerId": null, "originalText": "registra todo", "autoResize": false, "lineHeight": 1.25}], "appState": {"gridSize": null, "viewBackgroundColor": "#ffffff"}, "files": {}};
+    const POST_URL = "https://json.excalidraw.com/api/v2/post/";
+    const EXCALIDRAW_URL = "https://excalidraw.com/";
+
+    function base64url(buffer) {
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    }
+
+    function concatBuffers(...buffers) {
+      const totalLength = 4 + buffers.length * 4 + buffers.reduce((sum, buffer) => sum + buffer.byteLength, 0);
+      const output = new ArrayBuffer(totalLength);
+      const view = new DataView(output);
+      const bytes = new Uint8Array(output);
+      let cursor = 0;
+      view.setUint32(cursor, 1);
+      cursor += 4;
+      for (const buffer of buffers) {
+        view.setUint32(cursor, buffer.byteLength);
+        cursor += 4;
+        bytes.set(new Uint8Array(buffer), cursor);
+        cursor += buffer.byteLength;
+      }
+      return output;
+    }
+
+    async function deflate(buffer) {
+      if (!("CompressionStream" in window)) {
+        throw new Error("Your browser does not support CompressionStream. Download the .excalidraw file and import it manually.");
+      }
+      const stream = new Blob([buffer]).stream().pipeThrough(new CompressionStream("deflate"));
+      return await new Response(stream).arrayBuffer();
+    }
+
+    async function createUrl(scene) {
+      const key = crypto.getRandomValues(new Uint8Array(16));
+      const iv = crypto.getRandomValues(new Uint8Array(12));
+      const cryptoKey = await crypto.subtle.importKey("raw", key, "AES-GCM", false, ["encrypt"]);
+      const databaseScene = {
+        type: scene.type || "excalidraw",
+        version: scene.version || 2,
+        source: scene.source || "https://excalidraw.com",
+        elements: scene.elements || [],
+        appState: scene.appState || {},
+      };
+      const encoder = new TextEncoder();
+      const data = encoder.encode(JSON.stringify(databaseScene, null, 2)).buffer;
+      const encodingMetadata = encoder.encode(JSON.stringify({ version: 2, compression: "pako@1", encryption: "AES-GCM" })).buffer;
+      const contentsMetadata = encoder.encode("null").buffer;
+      const contents = concatBuffers(contentsMetadata, data);
+      const compressed = await deflate(contents);
+      const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv, tagLength: 128 }, cryptoKey, compressed);
+      const payload = concatBuffers(encodingMetadata, iv.buffer, encrypted);
+      const response = await fetch(POST_URL, { method: "POST", body: payload });
+      const result = await response.json();
+      if (!response.ok || !result.id) throw new Error(`Excalidraw upload failed: ${response.status}`);
+      return `${EXCALIDRAW_URL}#json=${result.id},${base64url(key)}`;
+    }
+
+    const button = document.getElementById("open-web");
+    if (button) {
+      button.addEventListener("click", async () => {
+        const note = document.getElementById("note");
+        try {
+          button.disabled = true;
+          button.textContent = "Generating link...";
+          const url = await createUrl(SCENE);
+          button.textContent = "Open in Excalidraw";
+          button.disabled = false;
+          note.textContent = "Web link generated in your browser. Opening Excalidraw now.";
+          window.open(url, "_blank", "noreferrer");
+        } catch (error) {
+          button.disabled = false;
+          button.textContent = "Open in Excalidraw";
+          note.textContent = error.message || String(error);
+        }
+      });
+    }
+  </script>
+</body>
+</html>
