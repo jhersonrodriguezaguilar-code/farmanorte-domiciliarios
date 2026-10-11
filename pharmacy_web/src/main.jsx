@@ -238,6 +238,66 @@ function LoginRouteMotion() {
   );
 }
 
+function LoginDeliveryScene() {
+  return (
+    <div className="login-delivery-scene" aria-hidden="true">
+      <svg className="delivery-scene-art" viewBox="0 0 520 260" focusable="false">
+        <path className="scene-route-shadow" d="M82 211 C155 184 188 230 257 202 S355 176 438 209" />
+        <path className="scene-route" d="M82 211 C155 184 188 230 257 202 S355 176 438 209" />
+        <circle className="scene-route-node scene-node-one" cx="82" cy="211" r="5" />
+        <circle className="scene-route-node scene-node-two" cx="257" cy="202" r="5" />
+        <circle className="scene-route-node scene-node-three" cx="438" cy="209" r="5" />
+
+        <g className="scene-phone">
+          <rect x="72" y="51" width="84" height="144" rx="14" fill="#f8fcff" stroke="#a8cdef" strokeWidth="3" />
+          <rect x="81" y="64" width="66" height="112" rx="7" fill="#e5f2ff" />
+          <rect x="96" y="57" width="36" height="5" rx="2.5" fill="#a8cdef" />
+          <circle cx="114" cy="184" r="4" fill="#a8cdef" />
+          <path className="scene-phone-route" d="M94 133 C105 121 111 151 123 137 S136 128 141 114" fill="none" stroke="#2151aa" strokeWidth="3" strokeLinecap="round" strokeDasharray="5 6" />
+          <circle cx="95" cy="133" r="5" fill="#2151aa" />
+          <circle cx="141" cy="114" r="5" fill="#6eb2f0" />
+          <path d="M112 101h9M105 109h23" stroke="#7cadd7" strokeWidth="3" strokeLinecap="round" />
+          <path d="M101 152h25M101 159h18" stroke="#9bc4e8" strokeWidth="3" strokeLinecap="round" />
+        </g>
+
+        <g className="scene-pharmacy">
+          <path d="M225 123 285 91l61 32v78h-121z" fill="#c7e1f8" stroke="#86b8e8" strokeWidth="3" strokeLinejoin="round" />
+          <path d="m225 123 60-32 61 32" fill="none" stroke="#f8fcff" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" />
+          <rect x="240" y="138" width="32" height="63" rx="3" fill="#edf7ff" stroke="#86b8e8" strokeWidth="3" />
+          <rect x="286" y="139" width="43" height="29" rx="4" fill="#edf7ff" stroke="#86b8e8" strokeWidth="3" />
+          <path d="M307.5 145v17M299 153.5h17" stroke="#2151aa" strokeWidth="5" strokeLinecap="round" />
+          <path d="M234 121h102" stroke="#edf7ff" strokeWidth="6" strokeLinecap="round" />
+          <circle cx="248" cy="128" r="3" fill="#2151aa" />
+          <circle cx="319" cy="128" r="3" fill="#2151aa" />
+        </g>
+
+        <g className="scene-package">
+          <path d="m354 160 30-15 29 15-30 17z" fill="#f8fcff" stroke="#a8cdef" strokeWidth="3" strokeLinejoin="round" />
+          <path d="m354 160 1 30 28 17 1-30zM413 160l-1 30-29 17 1-30z" fill="#b8d9f6" stroke="#86b8e8" strokeWidth="3" strokeLinejoin="round" />
+          <path d="m383 145 1 32M369 153l29 16" stroke="#2151aa" strokeWidth="3" strokeLinecap="round" />
+        </g>
+
+        <g className="scene-courier">
+          <circle cx="433" cy="137" r="13" fill="#f8fcff" stroke="#a8cdef" strokeWidth="3" />
+          <path d="M421 135c2-13 20-18 27-4-8-3-17-2-27 4z" fill="#d6ebfc" />
+          <path d="M416 158c5-12 26-13 34 0l11 24h-57z" fill="#eaf6ff" stroke="#a8cdef" strokeWidth="3" strokeLinejoin="round" />
+          <path d="M448 164h17l11 16-15 7-17-15z" fill="#2151aa" opacity=".88" />
+          <path d="M429 183h42" stroke="#86b8e8" strokeWidth="3" strokeLinecap="round" />
+          <path d="M420 185 400 211h71l-17-26M410 211l-9 11M460 211l9 11" fill="none" stroke="#f8fcff" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
+          <circle cx="401" cy="225" r="13" fill="#d8ecfc" stroke="#86b8e8" strokeWidth="3" />
+          <circle cx="469" cy="225" r="13" fill="#d8ecfc" stroke="#86b8e8" strokeWidth="3" />
+          <circle cx="401" cy="225" r="4" fill="#2151aa" />
+          <circle cx="469" cy="225" r="4" fill="#2151aa" />
+        </g>
+
+        <path className="scene-spark spark-one" d="m199 112 5 10 10 5-10 5-5 10-5-10-10-5 10-5z" fill="#f8fcff" />
+        <path className="scene-spark spark-two" d="m370 92 3 7 7 3-7 3-3 7-3-7-7-3 7-3z" fill="#8fc4f4" />
+      </svg>
+      <span className="scene-caption"><span className="scene-caption-dot" /> Ruta conectada en tiempo real</span>
+    </div>
+  );
+}
+
 function LoginFormAtmosphere({ orbitRef, glowRef }) {
   return (
     <div className="login-atmosphere" aria-hidden="true">
@@ -944,7 +1004,7 @@ function LoginScreen() {
     setSubmitting(false);
   };
 
-  return <div className="auth-page"><div className="auth-aside"><div className="brand-lockup"><BrandLogo inverse /></div><div className="auth-quote"><LoginHeroCopy /><LoginRouteMotion /></div><div className="auth-aside-footer">Panel privado para personal autorizado</div></div><main className="auth-main"><div className="auth-form-wrap" onPointerMove={moveAtmosphere} onPointerLeave={resetAtmosphere}><LoginFormAtmosphere orbitRef={atmosphereOrbitRef} glowRef={atmosphereGlowRef} /><span className="section-kicker">Acceso de farmacia</span><h2>Inicia sesión</h2><p className="auth-copy">Usa el usuario que el administrador creó para tu farmacia.</p>{error && <div className="inline-alert error-alert" role="alert">{error}</div>}<form onSubmit={submit} className="auth-form"><Field label="Usuario o correo" required><input type="text" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="juan.perez" autoComplete="username" required /></Field><Field label="Contraseña" required><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" autoComplete="current-password" required /></Field><button className="primary-button full-width" disabled={submitting}>{submitting ? 'Validando…' : 'Entrar al panel'} <span>→</span></button></form><div className="auth-note"><span>●</span> Autenticación protegida por Supabase Auth</div></div></main></div>;
+  return <div className="auth-page"><div className="auth-aside"><div className="brand-lockup"><BrandLogo inverse /></div><div className="auth-quote"><LoginHeroCopy /><LoginDeliveryScene /><LoginRouteMotion /></div><div className="auth-aside-footer">Panel privado para personal autorizado</div></div><main className="auth-main"><div className="auth-form-wrap" onPointerMove={moveAtmosphere} onPointerLeave={resetAtmosphere}><LoginFormAtmosphere orbitRef={atmosphereOrbitRef} glowRef={atmosphereGlowRef} /><span className="section-kicker">Acceso de farmacia</span><h2>Inicia sesión</h2><p className="auth-copy">Usa el usuario que el administrador creó para tu farmacia.</p>{error && <div className="inline-alert error-alert" role="alert">{error}</div>}<form onSubmit={submit} className="auth-form"><Field label="Usuario o correo" required><input type="text" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="juan.perez" autoComplete="username" required /></Field><Field label="Contraseña" required><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" autoComplete="current-password" required /></Field><button className="primary-button full-width" disabled={submitting}>{submitting ? 'Validando…' : 'Entrar al panel'} <span>→</span></button></form><div className="auth-note"><span>●</span> Autenticación protegida por Supabase Auth</div></div></main></div>;
 }
 
 function ConfigScreen() {

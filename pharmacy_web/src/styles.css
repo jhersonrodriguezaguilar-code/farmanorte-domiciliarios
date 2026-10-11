@@ -477,12 +477,18 @@ input:hover, textarea:hover, select:hover { border-color: #9db8d8; }
 .history-page { padding: 30px; }
 .filter-button { border-radius: 10px; padding: 9px 12px; font-weight: 650; }
 
-.auth-page { background: #eef4fc; }
+.auth-page {
+  grid-template-columns: minmax(420px, 48%) minmax(0, 1fr);
+  gap: 14px;
+  padding: 14px;
+  background: #eef4fc;
+}
 .auth-aside {
   position: relative;
   isolation: isolate;
   overflow: hidden;
   padding: 48px clamp(30px, 6vw, 104px);
+  border-radius: 10px;
 }
 .auth-aside::before {
   content: "";
@@ -512,24 +518,106 @@ input:hover, textarea:hover, select:hover { border-color: #9db8d8; }
 .auth-quote { max-width: 420px; }
 .auth-quote h1 { max-width: 390px; font-size: clamp(42px, 4.5vw, 70px); text-wrap: balance; }
 .auth-quote p { max-width: 340px; font-size: 14px; }
+.auth-aside .brand-logo-inverse { gap: 7px; }
+.auth-aside .brand-logo-inverse svg { width: 30px; height: 30px; }
+.auth-aside .brand-logo-inverse span { font-size: clamp(16px, 1.6vw, 20px); }
+.auth-aside-footer { letter-spacing: .01em; }
+.auth-main {
+  min-width: 0;
+  border: 1px solid #dbe8f4;
+  border-radius: 10px;
+  background: #f6faff;
+}
 .auth-form-wrap {
   position: relative;
-  width: min(100%, 430px);
-  padding: 44px;
+  width: min(100%, 404px);
+  padding: 36px;
   border: 1px solid #d7e3f0;
-  border-radius: 24px;
+  border-radius: 16px;
   background: #ffffff;
   box-shadow: 0 22px 54px rgba(23,63,142,.12);
   animation: rise-in .58s .08s ease-out both;
   overflow: hidden;
 }
-.auth-form-wrap::before { content: ""; position: absolute; top: 0; left: 40px; right: 40px; z-index: 3; height: 4px; border-radius: 0 0 6px 6px; background: var(--brand-blue); }
+.auth-form-wrap::before { content: ""; position: absolute; top: 0; left: 32px; right: 32px; z-index: 3; height: 4px; border-radius: 0 0 6px 6px; background: var(--brand-blue); }
 .auth-form-wrap > :not(.login-atmosphere) { position: relative; z-index: 2; }
-.auth-form-wrap h2 { font-size: 38px; }
-.auth-copy { max-width: 34ch; margin-bottom: 32px; }
+.auth-form-wrap h2 { font-size: 34px; }
+.auth-copy { max-width: 34ch; margin-bottom: 26px; }
 .auth-form .field { margin-bottom: 21px; }
 .auth-form .primary-button { margin-top: 11px; }
 .auth-note { padding-top: 17px; border-top: 1px solid #e2ebf5; }
+
+.login-delivery-scene {
+  position: relative;
+  min-height: 194px;
+  margin: 12px -18px 0;
+  overflow: visible;
+}
+.delivery-scene-art {
+  display: block;
+  width: 100%;
+  max-width: 520px;
+  aspect-ratio: 2 / 1;
+  overflow: visible;
+  filter: drop-shadow(0 16px 18px rgba(14, 50, 114, .18));
+}
+.scene-route-shadow,
+.scene-route {
+  fill: none;
+  stroke-linecap: round;
+}
+.scene-route-shadow { stroke: rgba(10, 45, 111, .24); stroke-width: 8; }
+.scene-route {
+  stroke: rgba(248, 252, 255, .9);
+  stroke-width: 3;
+  stroke-dasharray: 2 12;
+  animation: scene-route-flow 2.8s linear infinite;
+}
+.scene-route-node {
+  fill: #2151aa;
+  stroke: #f8fcff;
+  stroke-width: 3;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: scene-node-pulse 2.6s ease-in-out infinite;
+}
+.scene-node-two { animation-delay: -.8s; }
+.scene-node-three { animation-delay: -1.5s; }
+.scene-phone,
+.scene-pharmacy,
+.scene-package,
+.scene-courier {
+  transform-box: fill-box;
+  transform-origin: center;
+  will-change: transform;
+}
+.scene-phone { animation: scene-phone-float 4.8s ease-in-out infinite; }
+.scene-pharmacy { animation: scene-pharmacy-breathe 5.4s ease-in-out -.8s infinite; }
+.scene-package { animation: scene-package-float 3.1s ease-in-out -1.2s infinite; }
+.scene-courier { animation: scene-courier-bob 1.8s ease-in-out -.4s infinite; }
+.scene-phone-route { animation: scene-phone-route-flow 2.2s linear infinite; }
+.scene-spark { transform-box: fill-box; transform-origin: center; animation: scene-sparkle 2.7s ease-in-out infinite; }
+.spark-two { animation-delay: -1.4s; }
+.scene-caption {
+  position: absolute;
+  left: 20px;
+  bottom: -3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #d8e9fb;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: .04em;
+}
+.scene-caption-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 0 0 5px rgba(255,255,255,.13);
+  animation: pulse-mark 1.8s ease-in-out infinite;
+}
 
 .login-atmosphere {
   position: absolute;
@@ -627,13 +715,13 @@ input:hover, textarea:hover, select:hover { border-color: #9db8d8; }
 }
 .hero-route {
   position: relative;
-  min-height: 112px;
-  margin-top: 32px;
-  padding: 16px 17px 14px;
+  min-height: 88px;
+  margin-top: 18px;
+  padding: 13px 15px 12px;
   overflow: hidden;
   isolation: isolate;
   border: 1px solid rgba(255,255,255,.25);
-  border-radius: 16px;
+  border-radius: 13px;
   background: rgba(255,255,255,.09);
 }
 .hero-route::before {
@@ -711,7 +799,7 @@ input:hover, textarea:hover, select:hover { border-color: #9db8d8; }
 .hero-route-label {
   position: absolute;
   left: 17px;
-  bottom: 14px;
+  bottom: 11px;
   color: #d8e9fb;
   font-size: 8px;
   font-weight: 900;
@@ -784,6 +872,36 @@ input:hover, textarea:hover, select:hover { border-color: #9db8d8; }
   0%, 100% { opacity: .28; transform: scale(.72); }
   50% { opacity: 1; transform: scale(1.4); }
 }
+@keyframes scene-route-flow {
+  to { stroke-dashoffset: -42px; }
+}
+@keyframes scene-node-pulse {
+  0%, 100% { opacity: .72; transform: scale(.78); }
+  50% { opacity: 1; transform: scale(1.22); }
+}
+@keyframes scene-phone-float {
+  0%, 100% { transform: translate3d(0, 3px, 0) rotate(-2deg); }
+  50% { transform: translate3d(0, -8px, 0) rotate(1deg); }
+}
+@keyframes scene-pharmacy-breathe {
+  0%, 100% { transform: translate3d(0, 2px, 0) scale(.985); }
+  50% { transform: translate3d(0, -3px, 0) scale(1); }
+}
+@keyframes scene-package-float {
+  0%, 100% { transform: translate3d(0, 3px, 0) rotate(-1deg); }
+  50% { transform: translate3d(0, -6px, 0) rotate(2deg); }
+}
+@keyframes scene-courier-bob {
+  0%, 100% { transform: translate3d(0, 2px, 0); }
+  50% { transform: translate3d(0, -4px, 0); }
+}
+@keyframes scene-phone-route-flow {
+  to { stroke-dashoffset: -22px; }
+}
+@keyframes scene-sparkle {
+  0%, 100% { opacity: .38; transform: scale(.72) rotate(0deg); }
+  50% { opacity: 1; transform: scale(1.14) rotate(18deg); }
+}
 
 @media (max-width: 720px) {
   .sidebar { padding: 20px; box-shadow: 0 10px 24px rgba(23,63,142,.10); }
@@ -793,10 +911,16 @@ input:hover, textarea:hover, select:hover { border-color: #9db8d8; }
   .operator-info { width: 100%; }
   .card-heading, .form-section, .form-actions, .history-page { padding-left: 20px; padding-right: 20px; }
   .form-card, .info-card, .process-card, .history-page { border-radius: 16px; }
-  .auth-aside { min-height: 370px; padding: 30px 24px; }
-  .auth-form-wrap { padding: 34px 24px; border-radius: 19px; }
+  .auth-page { grid-template-columns: 1fr; gap: 0; padding: 0; }
+  .auth-aside { min-height: 470px; padding: 30px 24px 28px; border-radius: 0; }
+  .auth-main { min-height: 560px; padding: 34px 23px; border: 0; border-radius: 0; }
+  .auth-form-wrap { padding: 34px 24px; border-radius: 16px; }
   .auth-form-wrap::before { left: 24px; right: 24px; }
-  .hero-route { min-height: 106px; }
+  .auth-aside .brand-logo-inverse svg { width: 28px; height: 28px; }
+  .auth-aside .brand-logo-inverse span { font-size: 17px; }
+  .auth-quote h1 { font-size: 42px; }
+  .login-delivery-scene { min-height: 178px; margin-left: -8px; margin-right: -8px; }
+  .hero-route { min-height: 82px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -808,7 +932,16 @@ input:hover, textarea:hover, select:hover { border-color: #9db8d8; }
   .hero-caret,
   .atmosphere-ring,
   .atmosphere-core,
-  .atmosphere-star { animation: none !important; }
+  .atmosphere-star,
+  .scene-route,
+  .scene-route-node,
+  .scene-phone,
+  .scene-pharmacy,
+  .scene-package,
+  .scene-courier,
+  .scene-phone-route,
+  .scene-spark,
+  .scene-caption-dot { animation: none !important; }
   .login-atmosphere-orbit,
   .login-atmosphere-glow { transform: none !important; }
   .auth-form-wrap .field,
