@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createClient } from '@supabase/supabase-js';
 import './styles.css';
@@ -105,6 +105,103 @@ function normalizeAuthIdentifier(value) {
 
 function BrandLogo() {
   return <img className="brand-logo" src={`${import.meta.env.BASE_URL}farmanorte-logo.png`} alt="FarmaNorte" />;
+}
+
+const LOGIN_MESSAGES = [
+  'Domicilio listo para registrar',
+  'Cobertura activa en tu zona',
+  'Cada entrega queda guardada',
+];
+
+function LoginMotion() {
+  const [message, setMessage] = useState(LOGIN_MESSAGES[0]);
+  const [reducedMotion, setReducedMotion] = useState(false);
+  const routeRef = useRef(null);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const syncMotionPreference = () => setReducedMotion(mediaQuery.matches);
+    syncMotionPreference();
+    mediaQuery.addEventListener?.('change', syncMotionPreference);
+    return () => mediaQuery.removeEventListener?.('change', syncMotionPreference);
+  }, []);
+
+  useEffect(() => {
+    if (reducedMotion) {
+      setMessage(LOGIN_MESSAGES[0]);
+      return undefined;
+    }
+
+    let messageIndex = 0;
+    let characterIndex = 0;
+    let deleting = false;
+    let timer;
+
+    const tick = () => {
+      if (document.hidden) {
+        timer = window.setTimeout(tick, 800);
+        return;
+      }
+
+      const currentMessage = LOGIN_MESSAGES[messageIndex];
+      if (!deleting) {
+        characterIndex = Math.min(characterIndex + 1, currentMessage.length);
+        setMessage(currentMessage.slice(0, characterIndex));
+        if (characterIndex === currentMessage.length) {
+          deleting = true;
+          timer = window.setTimeout(tick, 1500);
+          return;
+        }
+      } else {
+        characterIndex = Math.max(characterIndex - 1, 0);
+        setMessage(currentMessage.slice(0, characterIndex));
+        if (characterIndex === 0) {
+          deleting = false;
+          messageIndex = (messageIndex + 1) % LOGIN_MESSAGES.length;
+          timer = window.setTimeout(tick, 420);
+          return;
+        }
+      }
+
+      timer = window.setTimeout(tick, deleting ? 32 : 54);
+    };
+
+    timer = window.setTimeout(tick, 520);
+    return () => window.clearTimeout(timer);
+  }, [reducedMotion]);
+
+  useEffect(() => {
+    const route = routeRef.current;
+    if (!route || reducedMotion) return undefined;
+
+    const measureRoute = () => {
+      const distance = Math.max(0, route.clientWidth - 18);
+      route.style.setProperty('--route-distance', `${distance}px`);
+      route.style.setProperty('--route-half-distance', `${distance / 2}px`);
+    };
+
+    measureRoute();
+    const observer = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(measureRoute);
+    observer?.observe(route);
+    return () => observer?.disconnect();
+  }, [reducedMotion]);
+
+  return (
+    <div className="login-motion" aria-hidden="true">
+      <div className="login-motion-track">
+        <span className="login-motion-node node-one" />
+        <span className="login-motion-node node-two" />
+        <span className="login-motion-node node-three" />
+        <span className="login-motion-runner" ref={routeRef} />
+      </div>
+      <div className="login-motion-copy">
+        <span className="login-motion-status">EN VIVO</span>
+        <span className="login-typewriter">{message}<span className="login-caret">|</span></span>
+      </div>
+    </div>
+  );
 }
 
 function App() {
@@ -760,7 +857,7 @@ function LoginScreen() {
     setSubmitting(false);
   };
 
-  return <div className="auth-page"><div className="auth-aside"><div className="brand-lockup"><BrandLogo /></div><div className="auth-quote"><span className="section-kicker">Red de domicilios</span><h1>Cada entrega, siempre registrada.</h1><p>Publica, sigue y deja registrado cada domicilio desde el punto de farmacia.</p></div><div className="auth-aside-footer">Panel privado para personal autorizado</div></div><main className="auth-main"><div className="auth-form-wrap"><span className="section-kicker">Acceso de farmacia</span><h2>Inicia sesión</h2><p className="auth-copy">Usa el usuario que el administrador creó para tu farmacia.</p>{error && <div className="inline-alert error-alert" role="alert">{error}</div>}<form onSubmit={submit} className="auth-form"><Field label="Usuario o correo" required><input type="text" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="juan.perez" autoComplete="username" required /></Field><Field label="Contraseña" required><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" autoComplete="current-password" required /></Field><button className="primary-button full-width" disabled={submitting}>{submitting ? 'Validando…' : 'Entrar al panel'} <span>→</span></button></form><div className="auth-note"><span>●</span> Autenticación protegida por Supabase Auth</div></div></main></div>;
+  return <div className="auth-page"><div className="auth-aside"><div className="brand-lockup"><BrandLogo /></div><div className="auth-quote"><span className="section-kicker">Red de domicilios</span><h1>Cada entrega, siempre registrada.</h1><p>Publica, sigue y deja registrado cada domicilio desde el punto de farmacia.</p></div><div className="auth-aside-footer">Panel privado para personal autorizado</div></div><main className="auth-main"><div className="auth-form-wrap"><span className="section-kicker">Acceso de farmacia</span><h2>Inicia sesión</h2><p className="auth-copy">Usa el usuario que el administrador creó para tu farmacia.</p><LoginMotion />{error && <div className="inline-alert error-alert" role="alert">{error}</div>}<form onSubmit={submit} className="auth-form"><Field label="Usuario o correo" required><input type="text" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="juan.perez" autoComplete="username" required /></Field><Field label="Contraseña" required><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" autoComplete="current-password" required /></Field><button className="primary-button full-width" disabled={submitting}>{submitting ? 'Validando…' : 'Entrar al panel'} <span>→</span></button></form><div className="auth-note"><span>●</span> Autenticación protegida por Supabase Auth</div></div></main></div>;
 }
 
 function ConfigScreen() {

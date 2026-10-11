@@ -505,6 +505,7 @@ input:hover, textarea:hover, select:hover { border-color: #9db8d8; }
   background: #ffffff;
   box-shadow: 0 22px 54px rgba(23,63,142,.12);
   animation: rise-in .58s .08s ease-out both;
+  overflow: hidden;
 }
 .auth-form-wrap::before { content: ""; position: absolute; top: 0; left: 40px; right: 40px; height: 4px; border-radius: 0 0 6px 6px; background: var(--brand-blue); }
 .auth-form-wrap h2 { font-size: 38px; }
@@ -513,6 +514,112 @@ input:hover, textarea:hover, select:hover { border-color: #9db8d8; }
 .auth-form .primary-button { margin-top: 11px; }
 .auth-note { padding-top: 17px; border-top: 1px solid #e2ebf5; }
 
+.login-motion {
+  position: relative;
+  min-height: 112px;
+  margin: 0 0 25px;
+  padding: 15px 17px 14px;
+  overflow: hidden;
+  isolation: isolate;
+  border: 1px solid #d9e7f4;
+  border-radius: 16px;
+  background: #f7fbff;
+}
+.login-motion::before {
+  content: "";
+  position: absolute;
+  left: 12%;
+  right: 12%;
+  top: 50%;
+  z-index: -1;
+  border-top: 1px dashed #b9d3ed;
+  transform: translateY(-50%);
+}
+.login-motion-track {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.login-motion-node {
+  position: absolute;
+  top: calc(50% - 4px);
+  width: 8px;
+  height: 8px;
+  border: 2px solid #8bb6df;
+  border-radius: 50%;
+  background: #ffffff;
+  transform: translateY(-50%);
+}
+.login-motion-node::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border: 1px solid rgba(23, 63, 142, .12);
+  border-radius: 50%;
+}
+.node-one { left: 12%; }
+.node-two { left: calc(50% - 4px); }
+.node-three { right: 12%; }
+.login-motion-runner {
+  position: absolute;
+  left: 12%;
+  right: 12%;
+  top: calc(50% - 9px);
+  height: 18px;
+  --route-distance: 0px;
+  --route-half-distance: 0px;
+  pointer-events: none;
+}
+.login-motion-runner::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--brand-blue);
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 0 0 5px rgba(23, 63, 142, .08);
+  will-change: transform, opacity;
+  animation: login-route-run 4.8s cubic-bezier(.77, 0, .175, 1) infinite;
+}
+.login-motion-copy {
+  position: absolute;
+  left: 17px;
+  right: 17px;
+  bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 17px;
+}
+.login-motion-status {
+  flex: 0 0 auto;
+  padding: 4px 6px;
+  border-radius: 5px;
+  background: #dceafb;
+  color: var(--brand-blue);
+  font-size: 8px;
+  font-weight: 900;
+  letter-spacing: .1em;
+}
+.login-typewriter {
+  min-width: 0;
+  overflow: hidden;
+  color: #315d89;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: -.01em;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.login-caret {
+  color: var(--brand-blue);
+  font-weight: 900;
+  animation: login-caret-blink 900ms steps(1, end) infinite;
+}
+
 @keyframes rise-in {
   from { opacity: 0; transform: translateY(10px); }
   to { opacity: 1; transform: translateY(0); }
@@ -520,6 +627,15 @@ input:hover, textarea:hover, select:hover { border-color: #9db8d8; }
 @keyframes pulse-mark {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: .55; transform: scale(.78); }
+}
+@keyframes login-route-run {
+  0%, 12% { transform: translate3d(0, 0, 0); opacity: .25; }
+  42%, 62% { transform: translate3d(var(--route-half-distance), 0, 0); opacity: 1; }
+  88%, 100% { transform: translate3d(var(--route-distance), 0, 0); opacity: .25; }
+}
+@keyframes login-caret-blink {
+  0%, 48% { opacity: 1; }
+  49%, 100% { opacity: 0; }
 }
 
 @media (max-width: 720px) {
@@ -533,11 +649,14 @@ input:hover, textarea:hover, select:hover { border-color: #9db8d8; }
   .auth-aside { min-height: 370px; padding: 30px 24px; }
   .auth-form-wrap { padding: 34px 24px; border-radius: 19px; }
   .auth-form-wrap::before { left: 24px; right: 24px; }
+  .login-motion { min-height: 106px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  .login-motion-runner::before,
+  .login-caret { animation: none !important; }
 }
 
 /* Cobertura visible para la farmacia y bienvenida del operador. */
