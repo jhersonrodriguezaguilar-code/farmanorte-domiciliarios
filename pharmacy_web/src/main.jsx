@@ -107,16 +107,13 @@ function BrandLogo() {
   return <img className="brand-logo" src={`${import.meta.env.BASE_URL}farmanorte-logo.png`} alt="FarmaNorte" />;
 }
 
-const LOGIN_MESSAGES = [
-  'Domicilio listo para registrar',
-  'Cobertura activa en tu zona',
-  'Cada entrega queda guardada',
-];
+const HERO_TITLE = 'Cada entrega, siempre registrada.';
+const HERO_COPY = 'Publica, sigue y deja registrado cada domicilio desde el punto de farmacia.';
 
-function LoginMotion() {
-  const [message, setMessage] = useState(LOGIN_MESSAGES[0]);
+function LoginHeroCopy() {
+  const [visibleTitle, setVisibleTitle] = useState('');
+  const [visibleCopy, setVisibleCopy] = useState('');
   const [reducedMotion, setReducedMotion] = useState(false);
-  const routeRef = useRef(null);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -128,51 +125,94 @@ function LoginMotion() {
 
   useEffect(() => {
     if (reducedMotion) {
-      setMessage(LOGIN_MESSAGES[0]);
+      setVisibleTitle(HERO_TITLE);
+      setVisibleCopy(HERO_COPY);
       return undefined;
     }
 
-    let messageIndex = 0;
-    let characterIndex = 0;
-    let deleting = false;
+    let titleIndex = 0;
+    let copyIndex = 0;
+    let phase = 'title';
     let timer;
 
     const tick = () => {
       if (document.hidden) {
-        timer = window.setTimeout(tick, 800);
+        timer = window.setTimeout(tick, 900);
         return;
       }
 
-      const currentMessage = LOGIN_MESSAGES[messageIndex];
-      if (!deleting) {
-        characterIndex = Math.min(characterIndex + 1, currentMessage.length);
-        setMessage(currentMessage.slice(0, characterIndex));
-        if (characterIndex === currentMessage.length) {
-          deleting = true;
-          timer = window.setTimeout(tick, 1500);
+      if (phase === 'title') {
+        titleIndex = Math.min(titleIndex + 1, HERO_TITLE.length);
+        setVisibleTitle(HERO_TITLE.slice(0, titleIndex));
+        if (titleIndex === HERO_TITLE.length) {
+          phase = 'copy';
+          timer = window.setTimeout(tick, 260);
           return;
         }
-      } else {
-        characterIndex = Math.max(characterIndex - 1, 0);
-        setMessage(currentMessage.slice(0, characterIndex));
-        if (characterIndex === 0) {
-          deleting = false;
-          messageIndex = (messageIndex + 1) % LOGIN_MESSAGES.length;
-          timer = window.setTimeout(tick, 420);
-          return;
-        }
+        timer = window.setTimeout(tick, 56);
+        return;
       }
 
-      timer = window.setTimeout(tick, deleting ? 32 : 54);
+      if (phase === 'copy') {
+        copyIndex = Math.min(copyIndex + 1, HERO_COPY.length);
+        setVisibleCopy(HERO_COPY.slice(0, copyIndex));
+        if (copyIndex === HERO_COPY.length) {
+          phase = 'hold';
+          timer = window.setTimeout(tick, 2200);
+          return;
+        }
+        timer = window.setTimeout(tick, 25);
+        return;
+      }
+
+      if (phase === 'hold') {
+        phase = 'delete-copy';
+        timer = window.setTimeout(tick, 30);
+        return;
+      }
+
+      if (phase === 'delete-copy') {
+        copyIndex = Math.max(copyIndex - 1, 0);
+        setVisibleCopy(HERO_COPY.slice(0, copyIndex));
+        if (copyIndex === 0) {
+          phase = 'delete-title';
+        }
+        timer = window.setTimeout(tick, 20);
+        return;
+      }
+
+      titleIndex = Math.max(titleIndex - 1, 0);
+      setVisibleTitle(HERO_TITLE.slice(0, titleIndex));
+      if (titleIndex === 0) {
+        phase = 'title';
+        timer = window.setTimeout(tick, 620);
+        return;
+      }
+      timer = window.setTimeout(tick, 34);
     };
 
     timer = window.setTimeout(tick, 520);
     return () => window.clearTimeout(timer);
   }, [reducedMotion]);
 
+  return (
+    <>
+      <span className="section-kicker">Red de domicilios</span>
+      <div className="hero-copy-animated" aria-hidden="true">
+        <h1>{visibleTitle}<span className="hero-caret">|</span></h1>
+        <p>{visibleCopy}</p>
+      </div>
+      <span className="sr-only">{HERO_TITLE} {HERO_COPY}</span>
+    </>
+  );
+}
+
+function LoginRouteMotion() {
+  const routeRef = useRef(null);
+
   useEffect(() => {
     const route = routeRef.current;
-    if (!route || reducedMotion) return undefined;
+    if (!route) return undefined;
 
     const measureRoute = () => {
       const distance = Math.max(0, route.clientWidth - 18);
@@ -186,20 +226,17 @@ function LoginMotion() {
       : new ResizeObserver(measureRoute);
     observer?.observe(route);
     return () => observer?.disconnect();
-  }, [reducedMotion]);
+  }, []);
 
   return (
-    <div className="login-motion" aria-hidden="true">
-      <div className="login-motion-track">
-        <span className="login-motion-node node-one" />
-        <span className="login-motion-node node-two" />
-        <span className="login-motion-node node-three" />
-        <span className="login-motion-runner" ref={routeRef} />
+    <div className="hero-route" aria-hidden="true">
+      <div className="hero-route-track">
+        <span className="hero-route-node route-node-one" />
+        <span className="hero-route-node route-node-two" />
+        <span className="hero-route-node route-node-three" />
+        <span className="hero-route-runner" ref={routeRef} />
       </div>
-      <div className="login-motion-copy">
-        <span className="login-motion-status">EN VIVO</span>
-        <span className="login-typewriter">{message}<span className="login-caret">|</span></span>
-      </div>
+      <span className="hero-route-label">RUTA ACTIVA · EN VIVO</span>
     </div>
   );
 }
@@ -857,7 +894,7 @@ function LoginScreen() {
     setSubmitting(false);
   };
 
-  return <div className="auth-page"><div className="auth-aside"><div className="brand-lockup"><BrandLogo /></div><div className="auth-quote"><span className="section-kicker">Red de domicilios</span><h1>Cada entrega, siempre registrada.</h1><p>Publica, sigue y deja registrado cada domicilio desde el punto de farmacia.</p></div><div className="auth-aside-footer">Panel privado para personal autorizado</div></div><main className="auth-main"><div className="auth-form-wrap"><span className="section-kicker">Acceso de farmacia</span><h2>Inicia sesión</h2><p className="auth-copy">Usa el usuario que el administrador creó para tu farmacia.</p><LoginMotion />{error && <div className="inline-alert error-alert" role="alert">{error}</div>}<form onSubmit={submit} className="auth-form"><Field label="Usuario o correo" required><input type="text" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="juan.perez" autoComplete="username" required /></Field><Field label="Contraseña" required><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" autoComplete="current-password" required /></Field><button className="primary-button full-width" disabled={submitting}>{submitting ? 'Validando…' : 'Entrar al panel'} <span>→</span></button></form><div className="auth-note"><span>●</span> Autenticación protegida por Supabase Auth</div></div></main></div>;
+  return <div className="auth-page"><div className="auth-aside"><div className="brand-lockup"><BrandLogo /></div><div className="auth-quote"><LoginHeroCopy /><LoginRouteMotion /></div><div className="auth-aside-footer">Panel privado para personal autorizado</div></div><main className="auth-main"><div className="auth-form-wrap"><span className="section-kicker">Acceso de farmacia</span><h2>Inicia sesión</h2><p className="auth-copy">Usa el usuario que el administrador creó para tu farmacia.</p>{error && <div className="inline-alert error-alert" role="alert">{error}</div>}<form onSubmit={submit} className="auth-form"><Field label="Usuario o correo" required><input type="text" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="juan.perez" autoComplete="username" required /></Field><Field label="Contraseña" required><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="••••••••" autoComplete="current-password" required /></Field><button className="primary-button full-width" disabled={submitting}>{submitting ? 'Validando…' : 'Entrar al panel'} <span>→</span></button></form><div className="auth-note"><span>●</span> Autenticación protegida por Supabase Auth</div></div></main></div>;
 }
 
 function ConfigScreen() {
