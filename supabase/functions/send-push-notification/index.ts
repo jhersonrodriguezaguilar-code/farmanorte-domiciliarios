@@ -49,6 +49,8 @@ type DeliveryRow = {
   service_type: string | null;
   status: string;
   accepted_courier_id: string | null;
+  // Migración 042: motivo cuando la farmacia cancela.
+  cancellation_reason?: string | null;
   // Migración 039: hasta esta hora la oferta es solo para la zona.
   priority_until?: string | null;
 };
@@ -57,6 +59,8 @@ type PushEvent =
   | 'delivery_created'
   | 'delivery_assigned'
   | 'delivery_support_release'
+  | 'delivery_cancelled'
+  | 'delivery_released'
   | 'chat_message';
 
 // Quién recibe un domicilio nuevo (migración 041):
@@ -204,8 +208,8 @@ const readDelivery = async (adminClient: AdminClient, deliveryId: string) => {
     .eq('id', deliveryId)
     .maybeSingle();
   // priority_until llega con la migración 039; sin ella se lee como antes.
-  let result = await read(`${deliveryColumns}, priority_until`);
-  if (result.error && /priority_until/.test(result.error.message)) {
+  let result = await read(`${deliveryColumns}, priority_until, cancellation_reason`);
+  if (result.error && /priority_until|cancellation_reason/.test(result.error.message)) {
     result = await read(deliveryColumns);
   }
   if (result.error) throw new Error(`No se pudo leer el domicilio: ${result.error.message}`);
@@ -315,7 +319,7 @@ const targetUserIds = async ({
 }) => {
   const targetIds = new Set<string>();
 
-  if (event === 'delivery_created') {
+  if (event === 'delivery_created' || event === 'delivery_released') {
     const courierIds = await eligibleCourierIds(
       adminClient,
       delivery,
@@ -325,7 +329,7 @@ const targetUserIds = async ({
   } else if (event === 'delivery_support_release') {
     const courierIds = await eligibleCourierIds(adminClient, delivery, 'release');
     courierIds.forEach((id) => targetIds.add(id));
-  } else if (event === 'delivery_assigned') {
+  } else if (event === 'delivery_assigned' || event === 'delivery_cancelled') {
     if (delivery.accepted_courier_id) targetIds.add(delivery.accepted_courier_id);
   } else if (message?.sender_role === 'courier') {
     const { data, error } = await adminClient
@@ -531,13 +535,16 @@ Deno.serve(async (request) => {
     return json({ error: 'El cuerpo de la solicitud no es válido.' }, 400);
   }
 
-  const event: PushEvent = body.event === 'chat_message'
-    ? 'chat_message'
-    : body.event === 'delivery_assigned'
-      ? 'delivery_assigned'
-      : body.event === 'delivery_support_release'
-        ? 'delivery_support_release'
-        : 'delivery_created';
+  const knownEvents: PushEvent[] = [
+    'chat_message',
+    'delivery_assigned',
+    'delivery_support_release',
+    'delivery_cancelled',
+    'delivery_released',
+  ];
+  const event: PushEvent = knownEvents.includes(body.event as PushEvent)
+    ? body.event as PushEvent
+    : 'delivery_created';
   const deliveryId = String(body.delivery_id ?? '').trim();
   if (!deliveryId) return json({ error: 'Falta delivery_id.' }, 400);
 
@@ -552,6 +559,43 @@ Deno.serve(async (request) => {
     if (delivery.status !== 'offered') return json({ ok: true, sent: 0, skipped: 'not_offered' });
     if (!priorityActive(delivery)) {
       // Sin reserva de zona el primer aviso ya incluye a los apoyos.
+      await adminClient
+        .from('deliveries')
+        .update({ support_notified_at: new Date().toISOString() })
+        .eq('id', delivery.id)
+        .is('support_notified_at', null);
+    }
+  } else if (event === 'delivery_cancelled') {
+    const allowed = actor.role === 'admin' ||
+      (actor.role === 'pharmacy' && actor.pharmacy_code === delivery.pharmacy_code);
+    if (!allowed) return json({ error: 'No puedes notificar esta cancelación.' }, 403);
+    if (delivery.status !== 'cancelled') return json({ ok: true, sent: 0, skipped: 'not_cancelled' });
+    if (!delivery.accepted_courier_id) return json({ ok: true, sent: 0, skipped: 'without_courier' });
+  } else if (event === 'delivery_released') {
+    // Solo quien liberó el domicilio (registrado en delivery_events) puede
+    // pedir que se vuelva a ofrecer.
+    if (actor.role !== 'courier' && actor.role !== 'admin') {
+      return json({ error: 'No puedes notificar esta liberación.' }, 403);
+    }
+    if (delivery.status !== 'offered' || delivery.accepted_courier_id) {
+      return json({ ok: true, sent: 0, skipped: 'not_offered' });
+    }
+    if (actor.role === 'courier') {
+      const since = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+      const { data: releaseRows, error: releaseError } = await adminClient
+        .from('delivery_events')
+        .select('id')
+        .eq('delivery_id', delivery.id)
+        .eq('actor_id', authData.user.id)
+        .eq('event_type', 'released')
+        .gte('created_at', since)
+        .limit(1);
+      if (releaseError) return json({ error: `No se pudo validar la liberación: ${releaseError.message}` }, 500);
+      if (!releaseRows || releaseRows.length === 0) {
+        return json({ error: 'No liberaste este domicilio recientemente.' }, 403);
+      }
+    }
+    if (!priorityActive(delivery)) {
       await adminClient
         .from('deliveries')
         .update({ support_notified_at: new Date().toISOString() })
@@ -640,23 +684,35 @@ Deno.serve(async (request) => {
   const isChat = event === 'chat_message';
   const isAssignment = event === 'delivery_assigned';
   const isSupportRelease = event === 'delivery_support_release';
+  const isCancelled = event === 'delivery_cancelled';
+  const isReleased = event === 'delivery_released';
   const title = isChat
     ? 'Nuevo mensaje en el domicilio'
     : isAssignment
       ? 'Nuevo domicilio asignado'
-      : isSupportRelease
-        ? 'Domicilio disponible para ti'
-        : 'Nuevo domicilio disponible';
+      : isCancelled
+        ? 'Domicilio cancelado'
+        : isReleased
+          ? 'Domicilio disponible de nuevo'
+          : isSupportRelease
+            ? 'Domicilio disponible para ti'
+            : 'Nuevo domicilio disponible';
   const compactCode = (delivery.public_code ?? '').replace(/[\s_-]+/g, '').toUpperCase();
   const pharmacyLabel = `farmanorte ${delivery.pharmacy_code}`;
   const codeLabel = [compactCode, pharmacyLabel].filter(Boolean).join(' · ');
   const rawBody = isChat
     ? `${String(message?.sender_name ?? '').trim() || 'Operación'}: ${String(message?.body ?? 'Te escribieron en el chat.')}`
+    : isCancelled
+      ? `${codeLabel} · La farmacia lo canceló${delivery.cancellation_reason ? `: ${delivery.cancellation_reason}` : '.'} No lo recojas.`
     : isAssignment
       ? `${codeLabel} · La farmacia te asignó este domicilio. Toca para verlo.`
     : `${codeLabel}${delivery.service_type ? ` · ${delivery.service_type}` : ''} · Toca para ver y aceptar.`;
   const notificationBody = rawBody.length > 140 ? `${rawBody.slice(0, 137)}…` : rawBody;
-  const pushKind: PushKind = isChat ? 'chat_message' : isAssignment ? 'delivery_assigned' : 'delivery';
+  const pushKind: PushKind = isChat
+    ? 'chat_message'
+    : isAssignment || isCancelled
+      ? 'delivery_assigned'
+      : 'delivery';
   const pushData: Record<string, string> = {
     type: pushKind,
     delivery_id: delivery.id,

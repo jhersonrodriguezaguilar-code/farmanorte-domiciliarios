@@ -482,11 +482,18 @@ class BackgroundNotificationService {
   static String assignedChannelId(String soundId) =>
       'fn_assigned_${soundId}_v3';
 
-  static AndroidFlutterLocalNotificationsPlugin? get _android =>
-      _localNotifications
+  static AndroidFlutterLocalNotificationsPlugin? get _android {
+    if (!_localReady) return null;
+    try {
+      return _localNotifications
           .resolvePlatformSpecificImplementation<
             AndroidFlutterLocalNotificationsPlugin
           >();
+    } catch (_) {
+      // Tests and non-native runtimes may reach this path before initialization.
+      return null;
+    }
+  }
 
   static bool get _isAndroid =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
@@ -812,6 +819,9 @@ class BackgroundNotificationService {
 
   static Future<bool> _requestPermissionForEntry() async {
     try {
+      if (_isAndroid && !_localReady) {
+        await initialize(listenForMessages: false);
+      }
       final current = await refreshPermissionStatus();
       if (current == NotificationPermissionStatus.granted) {
         unawaited(initialize());
@@ -1848,6 +1858,7 @@ class RealtimeOperationsService {
       deliveryOutcome: data['deliveryOutcome']?.toString(),
       priorityUntil: DateTime.tryParse('${data['priorityUntil'] ?? ''}'),
       expiresAt: DateTime.tryParse('${data['expiresAt'] ?? ''}'),
+      publicCode: '${data['publicCode'] ?? ''}',
     );
   }
 
@@ -2517,20 +2528,41 @@ class SupabaseOperationsService {
 
     final profileRows = await _client!
         .from('profiles')
-        .select('id, full_name')
-        .eq('role', 'courier')
-        .eq('active', true);
+        .select('id, full_name, role, active')
+        .eq('role', 'courier');
     Map<String, dynamic>? courierRow;
+
+    final selectedCourierId = shift.courierId?.trim();
+    if (selectedCourierId != null && selectedCourierId.isNotEmpty) {
+      final selectedRow = await _client!
+          .from('profiles')
+          .select('id, full_name, role, active')
+          .eq('id', selectedCourierId)
+          .maybeSingle();
+      if (selectedRow != null) {
+        courierRow = Map<String, dynamic>.from(selectedRow as Map);
+      }
+    }
+
     for (final row in profileRows) {
-      if ('${row['id']}' == shift.courierId ||
-          '${row['full_name']}'.trim() == shift.courierName.trim()) {
+      if (courierRow != null) break;
+      if ('${row['full_name']}'.trim().toLowerCase() ==
+          shift.courierName.trim().toLowerCase()) {
         courierRow = row;
         break;
       }
     }
     if (courierRow == null) {
       throw StateError(
-        'El domiciliario debe existir como perfil activo antes de asignar un turno.',
+        'No se encontró el perfil del domiciliario seleccionado.',
+      );
+    }
+    if ('${courierRow['role']}'.toLowerCase() != 'courier') {
+      throw StateError('El perfil seleccionado no es un domiciliario.');
+    }
+    if (courierRow['active'] != true) {
+      throw StateError(
+        'El perfil de ${courierRow['full_name'] ?? shift.courierName} está desactivado. Actívalo en Usuarios antes de asignarle un turno.',
       );
     }
     final times = RegExp(r'(\d{1,2}:\d{2})')
@@ -2570,9 +2602,7 @@ class SupabaseOperationsService {
     final zoneRows = await _client!.from('zones').select('id, name');
     final profileRows = await _client!
         .from('profiles')
-        .select('id, full_name')
-        .eq('role', 'courier')
-        .eq('active', true);
+        .select('id, full_name, role, active');
     final zonesByName = <String, dynamic>{
       for (final row in zoneRows) '${row['name']}': row['id'],
     };
@@ -2587,16 +2617,30 @@ class SupabaseOperationsService {
         throw StateError('La zona ${shift.zone} no existe en Supabase.');
       }
       Map<String, dynamic>? courierRow;
-      if (shift.courierId != null) {
-        courierRow = profilesById[shift.courierId];
+      final selectedCourierId = shift.courierId?.trim();
+      if (selectedCourierId != null && selectedCourierId.isNotEmpty) {
+        courierRow = profilesById[selectedCourierId];
       }
       courierRow ??= profileRows.cast<Map<String, dynamic>?>().firstWhere(
-        (row) => '${row?['full_name']}'.trim() == shift.courierName.trim(),
+        (row) =>
+            '${row?['role']}'.toLowerCase() == 'courier' &&
+            '${row?['full_name']}'.trim().toLowerCase() ==
+                shift.courierName.trim().toLowerCase(),
         orElse: () => null,
       );
       if (courierRow == null) {
         throw StateError(
-          'El domiciliario ${shift.courierName} no está activo en Supabase.',
+          'No se encontró el perfil de ${shift.courierName} en Supabase.',
+        );
+      }
+      if ('${courierRow['role']}'.toLowerCase() != 'courier') {
+        throw StateError(
+          'El perfil de ${shift.courierName} no es un domiciliario.',
+        );
+      }
+      if (courierRow['active'] != true) {
+        throw StateError(
+          'El perfil de ${courierRow['full_name'] ?? shift.courierName} está desactivado. Actívalo en Usuarios antes de asignarle un turno.',
         );
       }
       final times = RegExp(r'(\d{1,2}:\d{2})')
@@ -2949,6 +2993,7 @@ class SupabaseOperationsService {
             'deliveryOutcome': row['delivery_outcome'],
             'priorityUntil': row['priority_until'],
             'expiresAt': row['expires_at'],
+            'publicCode': row['public_code'],
           };
           return RealtimeOperationsService.instance._deliveryFromMap(
             '${row['id']}',
@@ -3160,6 +3205,33 @@ class SupabaseOperationsService {
       },
     );
     return result == true || '$result'.toLowerCase() == 'true';
+  }
+
+  /// Migración 042: devuelve un domicilio aceptado (sin recoger) para que se
+  /// publique de nuevo, y avisa a los demás domiciliarios.
+  Future<bool> releaseDelivery({
+    required String deliveryId,
+    required String reason,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) return false;
+    final result = await _client!.rpc(
+      'release_delivery',
+      params: {'requested_delivery_id': deliveryId, 'requested_reason': reason},
+    );
+    final released = result == true || '$result'.toLowerCase() == 'true';
+    if (released) {
+      unawaited(() async {
+        try {
+          await _client!.functions.invoke(
+            'send-push-notification',
+            body: {'event': 'delivery_released', 'delivery_id': deliveryId},
+          );
+        } catch (_) {
+          // El aviso es complementario: el domicilio ya quedó publicado.
+        }
+      }());
+    }
+    return released;
   }
 
   Future<void> publishCourierConnection({
@@ -3455,6 +3527,16 @@ class OperationsBackend {
           asSupport: asSupport,
         )
       : Future.value(false);
+
+  Future<bool> releaseDelivery({
+    required String deliveryId,
+    required String reason,
+  }) => SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.releaseDelivery(
+          deliveryId: deliveryId,
+          reason: reason,
+        )
+      : Future.value(false);
 }
 
 enum DeliveryKind {
@@ -3468,7 +3550,17 @@ enum DeliveryKind {
 
 enum PaymentMethod { cash, card, qr }
 
-enum DeliveryStatus { offered, accepted, pickedUp, delivered, notDelivered }
+enum DeliveryStatus {
+  offered,
+  accepted,
+  pickedUp,
+  delivered,
+  notDelivered,
+  // Migración 042: la farmacia canceló el domicilio.
+  cancelled,
+  // La oferta venció sin que nadie la aceptara.
+  expired,
+}
 
 extension DeliveryKindX on DeliveryKind {
   String get label => switch (this) {
@@ -3527,7 +3619,13 @@ extension DeliveryStatusX on DeliveryStatus {
     DeliveryStatus.pickedUp => 'En recorrido',
     DeliveryStatus.delivered => 'Entregado',
     DeliveryStatus.notDelivered => 'No entregado',
+    DeliveryStatus.cancelled => 'Cancelado',
+    DeliveryStatus.expired => 'Vencido',
   };
+
+  /// Cancelado o vencido: ya no se ofrece ni se trabaja.
+  bool get isClosedWithoutService =>
+      this == DeliveryStatus.cancelled || this == DeliveryStatus.expired;
 }
 
 class DeliveryAddress {
@@ -3757,9 +3855,19 @@ class Delivery {
     this.deliveryOutcome,
     this.priorityUntil,
     this.expiresAt,
+    this.publicCode = '',
   });
 
   final String id;
+  // Consecutivo visible (FN167009). `id` es el identificador interno.
+  final String publicCode;
+
+  /// Lo que se muestra y se dicta: el consecutivo, o el id si no existe.
+  String get displayCode {
+    final code = formatDeliveryPublicCode(publicCode);
+    return code.isNotEmpty ? code : id;
+  }
+
   final String storeName;
   final String storeAddress;
   final String destination;
@@ -3864,6 +3972,7 @@ class Delivery {
     deliveryOutcome: deliveryOutcome ?? this.deliveryOutcome,
     priorityUntil: priorityUntil,
     expiresAt: expiresAt,
+    publicCode: publicCode,
   );
 }
 
@@ -7056,7 +7165,7 @@ class _PharmacyDeliveryCard extends StatelessWidget {
             children: [
               Expanded(
                 child: Text(
-                  delivery.id,
+                  delivery.displayCode,
                   style: const TextStyle(
                     color: AppColors.ink,
                     fontWeight: FontWeight.w900,
@@ -7742,6 +7851,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   }
 
   Future<void> _createOrEditShift([AdminShift? current]) async {
+    if (widget.realBackend) await _loadRemote();
+    if (!mounted) return;
     final shift = await showDialog<AdminShift>(
       context: context,
       builder: (_) => _AdminShiftDialog(
@@ -7786,6 +7897,8 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   }
 
   Future<void> _createWeeklyShifts() async {
+    if (widget.realBackend) await _loadRemote();
+    if (!mounted) return;
     final shifts = await showDialog<List<AdminShift>>(
       context: context,
       builder: (_) => _AdminWeeklyShiftDialog(
@@ -12573,6 +12686,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       previousCourier != _courierId);
             }).toList()
           : const <Delivery>[];
+      // Migración 042: la farmacia canceló un domicilio que yo tenía.
+      final cancelledForMe = _remoteDeliveryBaselineReady
+          ? remoteDeliveries.where((delivery) {
+              final previousStatus = _remoteDeliveryStatuses[delivery.id];
+              return delivery.status == DeliveryStatus.cancelled &&
+                  delivery.acceptedCourierId == _courierId &&
+                  (previousStatus == DeliveryStatus.accepted ||
+                      previousStatus == DeliveryStatus.pickedUp);
+            }).toList()
+          : const <Delivery>[];
       _remoteDeliveryStatuses
         ..clear()
         ..addEntries(
@@ -12592,6 +12715,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       unawaited(_consumePendingNotification());
       unawaited(_loadCourierEquivalentStatuses());
       unawaited(_loadCourierPharmacyBreakdown());
+      if (cancelledForMe.isNotEmpty) {
+        unawaited(AppNotificationAudio.playMessageAlert());
+        final codes = cancelledForMe
+            .map((delivery) => delivery.displayCode)
+            .join(', ');
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              duration: const Duration(seconds: 6),
+              content: Text(
+                'La farmacia canceló $codes. Si ya lo recogiste, '
+                'devuélvelo a la farmacia.',
+              ),
+            ),
+          );
+      }
       if (newOffers.isNotEmpty) {
         unawaited(
           AppNotificationAudio.playDeliveryAlertFor(
@@ -13377,7 +13517,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         .where(
           (delivery) =>
               delivery.status == DeliveryStatus.delivered ||
-              delivery.status == DeliveryStatus.notDelivered,
+              delivery.status == DeliveryStatus.notDelivered ||
+              // Los cancelados solo aparecen si estaban asignados a mí.
+              (delivery.status == DeliveryStatus.cancelled &&
+                  delivery.acceptedCourierId == _courierId),
         )
         .toList()
         .reversed
@@ -14492,7 +14635,7 @@ class DeliveryListItem extends StatelessWidget {
                 children: [
                   Expanded(
                     child: Text(
-                      delivery.id,
+                      delivery.displayCode,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: AppColors.primaryDark,
@@ -15208,6 +15351,8 @@ class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
     DeliveryStatus.pickedUp => 'Confirmar entrega',
     DeliveryStatus.delivered => 'Domicilio completado',
     DeliveryStatus.notDelivered => 'Novedad registrada',
+    DeliveryStatus.cancelled => 'La farmacia canceló este domicilio',
+    DeliveryStatus.expired => 'Oferta vencida',
   };
 
   Future<void> _advance() async {
@@ -15219,9 +15364,85 @@ class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
       case DeliveryStatus.pickedUp:
         await _setStatus(DeliveryStatus.delivered);
       case DeliveryStatus.delivered:
-        Navigator.pop(context);
       case DeliveryStatus.notDelivered:
+      case DeliveryStatus.cancelled:
+      case DeliveryStatus.expired:
         Navigator.pop(context);
+    }
+  }
+
+  /// Migración 042: el domiciliario devuelve el domicilio antes de recogerlo
+  /// (por ejemplo, tiene muchos pedidos). Vuelve a publicarse para los demás.
+  Future<void> _release() async {
+    const reasons = [
+      'Tengo muchos pedidos',
+      'No alcanzo a llegar a tiempo',
+      'Problema con la moto o el vehículo',
+      'Otro motivo',
+    ];
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: const Text('Liberar domicilio'),
+        children: [
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 24),
+            child: Text(
+              'Se publicará de nuevo para otros domiciliarios y la farmacia '
+              'recibirá el aviso. Elige el motivo:',
+            ),
+          ),
+          const SizedBox(height: 8),
+          for (final option in reasons)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(dialogContext, option),
+              child: Text(
+                option,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('No liberar'),
+          ),
+        ],
+      ),
+    );
+    if (reason == null || !mounted) return;
+    setState(() => _savingStatus = true);
+    try {
+      final released = await OperationsBackend.instance.releaseDelivery(
+        deliveryId: _delivery.id,
+        reason: reason,
+      );
+      if (!mounted) return;
+      if (!released) {
+        throw StateError('No se pudo liberar el domicilio.');
+      }
+      final updated = _delivery.copyWith(status: DeliveryStatus.offered);
+      setState(() => _delivery = updated);
+      widget.onChanged?.call(updated);
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text('Liberaste el domicilio. Se publicó de nuevo.'),
+          ),
+        );
+      Navigator.pop(context);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              'No se pudo liberar: ${'$error'.replaceFirst('PostgrestException(message: ', '').split(', code:').first.replaceFirst('Exception: ', '').replaceFirst('Bad state: ', '').trim()}',
+            ),
+          ),
+        );
+    } finally {
+      if (mounted) setState(() => _savingStatus = false);
     }
   }
 
@@ -15324,7 +15545,7 @@ class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
                                     : _delivery.status ==
                                           DeliveryStatus.notDelivered
                                     ? 'Domicilio no entregado'
-                                    : 'Pedido ${_delivery.id}',
+                                    : 'Pedido ${_delivery.displayCode}',
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
@@ -15380,6 +15601,7 @@ class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
             onPickupStop: _openPickupStop,
             onChat: _openChat,
             onEquivalent: _openEquivalent,
+            onRelease: _release,
           ),
         ),
       ],
@@ -16584,12 +16806,15 @@ class _DetailSheet extends StatelessWidget {
     required this.onPickupStop,
     required this.onChat,
     required this.onEquivalent,
+    this.onRelease,
   });
 
   final Delivery delivery;
   final String action;
   final bool advancing;
   final VoidCallback onAdvance;
+  // Migración 042: liberar el domicilio antes de recogerlo.
+  final VoidCallback? onRelease;
   final VoidCallback onOrigin;
   final VoidCallback onDestination;
   final ValueChanged<int> onDestinationChanged;
@@ -16675,7 +16900,7 @@ class _DetailSheet extends StatelessWidget {
                 ),
               ),
               Text(
-                delivery.id,
+                delivery.displayCode,
                 style: const TextStyle(
                   color: AppColors.muted,
                   fontSize: 11,
@@ -17167,7 +17392,26 @@ class _DetailSheet extends StatelessWidget {
                 ],
               ),
             )
-          else
+          else if (delivery.status.isClosedWithoutService)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: AppColors.danger.withValues(alpha: .08),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                delivery.status == DeliveryStatus.cancelled
+                    ? 'La farmacia canceló este domicilio. Si ya lo recogiste, '
+                          'devuélvelo a la farmacia.'
+                    : 'La oferta venció sin que nadie la aceptara.',
+                style: const TextStyle(
+                  color: AppColors.danger,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            )
+          else ...[
             FilledButton.icon(
               onPressed: advancing ? null : onAdvance,
               icon: Icon(
@@ -17181,6 +17425,23 @@ class _DetailSheet extends StatelessWidget {
               ),
               label: Text(advancing ? 'Guardando…' : action),
             ),
+            if (delivery.status == DeliveryStatus.accepted &&
+                onRelease != null) ...[
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: advancing ? null : onRelease,
+                  icon: const Icon(Icons.undo_rounded),
+                  label: const Text('Liberar domicilio'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.danger,
+                    minimumSize: const Size.fromHeight(48),
+                  ),
+                ),
+              ),
+            ],
+          ],
           if (done) ...[
             const SizedBox(height: 10),
             SizedBox(
@@ -18670,6 +18931,8 @@ class _StatusPill extends StatelessWidget {
     final color = switch (status) {
       DeliveryStatus.delivered => AppColors.success,
       DeliveryStatus.notDelivered => AppColors.danger,
+      DeliveryStatus.cancelled => AppColors.danger,
+      DeliveryStatus.expired => AppColors.muted,
       DeliveryStatus.offered => AppColors.primary,
       _ => AppColors.primaryDark,
     };
