@@ -55,7 +55,7 @@ APK de esta revisión:
 2. Crear un usuario real de farmacia sin elegir todavía el piloto.
 3. Desplegar y probar la página con ese usuario: cliente, varias direcciones,
    publicación y Realtime.
-4. Implementar y probar notificación, oferta de 3 minutos, aceptación,
+4. Implementar y probar notificación, oferta de 5 minutos, aceptación,
    aprobación de segundo domicilio, cola, cancelación y entrega.
 5. Implementar chat, llamadas, GPS, fotos opcionales y registro completo de
    eventos.

@@ -1,0 +1,6 @@
+# Copia este archivo como android/key.properties y reemplaza los valores.
+# No subas android/key.properties ni el archivo .jks al repositorio.
+storeFile=../keystores/farmanorte-release.jks
+storePassword=CAMBIAR_EN_LOCAL_O_EN_GITHUB_SECRETS
+keyAlias=farmanorte
+keyPassword=CAMBIAR_EN_LOCAL_O_EN_GITHUB_SECRETS

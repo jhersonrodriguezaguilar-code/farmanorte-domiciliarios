@@ -11,6 +11,26 @@ import 'package:flutter/material.dart';
 import 'package:farmanorte_domiciliarios/main.dart';
 
 void main() {
+  test('separa los roles de farmacia de la aplicación operativa', () {
+    expect(isSupportedOperationsAppRole('courier'), isTrue);
+    expect(isSupportedOperationsAppRole('admin'), isTrue);
+    expect(isSupportedOperationsAppRole('pharmacy'), isFalse);
+    expect(
+      operationsAppAccessMessage('pharmacy'),
+      contains('página web de la farmacia'),
+    );
+  });
+
+  testWidgets('la compilación real no muestra datos ficticios', (
+    WidgetTester tester,
+  ) async {
+    await tester.pumpWidget(const FarmaNorteApp());
+
+    expect(find.text('Conexión real requerida'), findsOneWidget);
+    expect(find.text('Juan Sebastián Ríos'), findsNothing);
+    expect(find.text('Pedidos disponibles'), findsNothing);
+  });
+
   test('aplica las excepciones operativas de farmacia por zona', () {
     expect(adminZoneAllowsAnyPharmacy('Zona 41'), isTrue);
     expect(adminZoneAllowsAnyPharmacy('Cantaclaro'), isTrue);
@@ -131,11 +151,11 @@ void main() {
   testWidgets('muestra el acceso para domiciliarios', (
     WidgetTester tester,
   ) async {
-    await tester.pumpWidget(const FarmaNorteApp());
+    await tester.pumpWidget(const FarmaNorteApp(allowLocalReview: true));
 
-    expect(find.bySemanticsLabel('Bienvenido a FarmaNorte'), findsOneWidget);
-    expect(find.text('Acceso domiciliario'), findsOneWidget);
-    expect(find.text('Ingresar'), findsOneWidget);
+    expect(find.bySemanticsLabel('Bienvenido a farmanorte'), findsOneWidget);
+    expect(find.text('ACCESO DE DOMICILIARIO'), findsOneWidget);
+    expect(find.text('Entrar a mi jornada'), findsOneWidget);
   });
 
   testWidgets('muestra pedidos y ganancias sin mapa en el inicio', (
@@ -145,8 +165,14 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
 
-    await tester.pumpWidget(const FarmaNorteApp());
-    await tester.tap(find.text('Ingresar'));
+    await tester.pumpWidget(const FarmaNorteApp(allowLocalReview: true));
+    final loginButton = find.text('Entrar a mi jornada');
+    expect(
+      tester.getBottomRight(loginButton).dy,
+      lessThanOrEqualTo(tester.view.physicalSize.height),
+    );
+    await tester.ensureVisible(loginButton);
+    await tester.tap(loginButton);
     await tester.pumpAndSettle();
 
     expect(find.text('Resumen de tu conexión'), findsOneWidget);
@@ -167,8 +193,10 @@ void main() {
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
 
-      await tester.pumpWidget(const FarmaNorteApp());
-      await tester.tap(find.text('Ingresar'));
+      await tester.pumpWidget(const FarmaNorteApp(allowLocalReview: true));
+      final loginButton = find.text('Entrar a mi jornada');
+      await tester.ensureVisible(loginButton);
+      await tester.tap(loginButton);
       await tester.pumpAndSettle();
 
       final connectionSwitch = find.byType(Switch).first;
@@ -183,6 +211,15 @@ void main() {
         findsOneWidget,
       );
 
+      final homeList = find.byType(ListView).last;
+      for (
+        var attempt = 0;
+        attempt < 8 && find.text('Aceptar').evaluate().isEmpty;
+        attempt++
+      ) {
+        await tester.drag(homeList, const Offset(0, -420));
+        await tester.pump();
+      }
       final acceptButtons = find.widgetWithText(FilledButton, 'Aceptar');
       expect(acceptButtons, findsWidgets);
       for (final element in acceptButtons.evaluate()) {
@@ -191,18 +228,46 @@ void main() {
     },
   );
 
+  testWidgets('muestra cerrar sesión arriba y sin overflow en el menú', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    await tester.pumpWidget(const FarmaNorteApp(allowLocalReview: true));
+    final loginButton = find.text('Entrar a mi jornada');
+    await tester.ensureVisible(loginButton);
+    await tester.tap(loginButton);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Abrir menú'));
+    await tester.pumpAndSettle();
+
+    final logout = find.text('Cerrar sesión');
+    final shifts = find.text('Turnos de la semana');
+    expect(logout, findsOneWidget);
+    expect(find.text('Salir de la cuenta actual'), findsOneWidget);
+    expect(
+      tester.getTopLeft(logout).dy,
+      lessThan(tester.getTopLeft(shifts).dy),
+    );
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('abre el panel administrativo con zonas y turnos', (
     WidgetTester tester,
   ) async {
-    await tester.pumpWidget(const FarmaNorteApp());
+    await tester.pumpWidget(const FarmaNorteApp(allowLocalReview: true));
 
     await tester.tap(find.text('Administrador'));
     await tester.pump();
 
-    expect(find.text('Acceso administrativo'), findsOneWidget);
+    expect(find.text('ACCESO ADMINISTRATIVO'), findsOneWidget);
     expect(find.text('Entrar al panel'), findsOneWidget);
 
-    await tester.tap(find.text('Entrar al panel'));
+    final adminLogin = find.text('Entrar al panel');
+    await tester.ensureVisible(adminLogin);
+    await tester.tap(adminLogin);
     await tester.pumpAndSettle();
 
     expect(find.text('Centro de operaciones'), findsOneWidget);
@@ -218,10 +283,12 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
 
-    await tester.pumpWidget(const FarmaNorteApp());
+    await tester.pumpWidget(const FarmaNorteApp(allowLocalReview: true));
     await tester.tap(find.text('Administrador'));
     await tester.pump();
-    await tester.tap(find.text('Entrar al panel'));
+    final adminLogin = find.text('Entrar al panel');
+    await tester.ensureVisible(adminLogin);
+    await tester.tap(adminLogin);
     await tester.pumpAndSettle();
 
     expect(find.text('Centro de operaciones'), findsOneWidget);
@@ -237,17 +304,19 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
 
-    await tester.pumpWidget(const FarmaNorteApp());
+    await tester.pumpWidget(const FarmaNorteApp(allowLocalReview: true));
     await tester.tap(find.text('Administrador'));
     await tester.pump();
-    await tester.tap(find.text('Entrar al panel'));
+    final adminLogin = find.text('Entrar al panel');
+    await tester.ensureVisible(adminLogin);
+    await tester.tap(adminLogin);
     await tester.pumpAndSettle();
 
     await tester.tap(find.widgetWithText(ChoiceChip, 'Farmacias'));
     await tester.pumpAndSettle();
     expect(find.text('Nueva farmacia'), findsOneWidget);
-    expect(find.text('FN 234'), findsOneWidget);
-    expect(find.text('FN 252'), findsOneWidget);
+    expect(find.text('farmanorte 234'), findsOneWidget);
+    expect(find.text('farmanorte 252'), findsOneWidget);
 
     final shiftsTab = find.widgetWithText(ChoiceChip, 'Turnos');
     await tester.ensureVisible(shiftsTab);
@@ -267,6 +336,47 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('ofrece apoyo en turno individual y en sugerencia semanal', (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(393, 852);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+
+    await tester.pumpWidget(const FarmaNorteApp(allowLocalReview: true));
+    await tester.tap(find.text('Administrador'));
+    await tester.pump();
+    final adminLogin = find.text('Entrar al panel');
+    await tester.ensureVisible(adminLogin);
+    await tester.tap(adminLogin);
+    await tester.pumpAndSettle();
+    final shiftsTab = find.widgetWithText(ChoiceChip, 'Turnos');
+    await tester.ensureVisible(shiftsTab);
+    await tester.tap(shiftsTab);
+    await tester.pumpAndSettle();
+
+    final newDayButton = find.text('Nuevo día');
+    await tester.ensureVisible(newDayButton);
+    await tester.tap(newDayButton);
+    await tester.pumpAndSettle();
+    expect(find.text('Apoyo general · todas las zonas'), findsOneWidget);
+    await tester.tap(find.text('Cancelar').last);
+    await tester.pumpAndSettle();
+
+    final programWeekButton = find.text('Programar semana');
+    await tester.ensureVisible(programWeekButton);
+    await tester.tap(programWeekButton);
+    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text('Apoyo general · todas las zonas'), findsWidgets);
+    await tester.tap(find.text('Sugerir automáticamente'));
+    await tester.pumpAndSettle();
+
+    final supportSwitches = tester.widgetList<Switch>(find.byType(Switch));
+    expect(supportSwitches, isNotEmpty);
+    expect(supportSwitches.any((tile) => tile.value), isTrue);
+  });
+
   testWidgets('muestra tarifa, cobro y contacto en el detalle', (
     WidgetTester tester,
   ) async {
@@ -274,18 +384,27 @@ void main() {
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
 
-    await tester.pumpWidget(const FarmaNorteApp());
-    await tester.tap(find.text('Ingresar'));
+    await tester.pumpWidget(const FarmaNorteApp(allowLocalReview: true));
+    final loginButton = find.text('Entrar a mi jornada');
+    await tester.ensureVisible(loginButton);
+    await tester.tap(loginButton);
     await tester.pumpAndSettle();
 
+    await tester.drag(find.byType(ListView).last, const Offset(0, -520));
+    await tester.pumpAndSettle();
     final acceptButton = find.widgetWithText(FilledButton, 'Aceptar').first;
     await tester.tap(acceptButton);
     await tester.pumpAndSettle();
     expect(find.text('Detalle del domicilio'), findsOneWidget);
+    expect(find.byType(CourierMap), findsNothing);
     await tester.drag(find.byType(ListView).last, const Offset(0, -600));
     await tester.pumpAndSettle();
 
     expect(find.text('Domicilio normal', skipOffstage: false), findsWidgets);
+    expect(
+      find.text('Chat con la farmacia', skipOffstage: false),
+      findsOneWidget,
+    );
     expect(find.text('Tu ganancia', skipOffstage: false), findsOneWidget);
     expect(find.text('Cobro', skipOffstage: false), findsOneWidget);
     expect(find.byTooltip('Llamar al cliente'), findsOneWidget);

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- El reductor de recursos de la compilación release eliminaba el ícono y los
+     sonidos de notificación porque solo se referencian por nombre desde Dart y
+     desde el servidor. Sin ellos, las notificaciones locales no se inicializan
+     y los canales quedan sin sonido. -->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@drawable/ic_notification,@raw/fast_ping_notification,@raw/message_alert,@raw/delivery_alert,@raw/koiroylers_shop_notification,@raw/akshai_orders_notification,@color/farmanorte_notification" />

@@ -51,3 +51,27 @@ app.*.map.json
 
 # Widget Preview related
 .widget_preview/
+# Android release signing material
+android/key.properties
+android/keystores/
+*.jks
+*.keystore
+
+# Salidas locales de compilación, QA y respaldos (no versionar)
+/output/
+/salidas-apk/
+/_build_logs/
+/_respaldo-push-*/
+/_pwa-preview/
+/.playwright-cli/
+/android/build/
+pharmacy_web/output/
+.codex-send-push-source.txt
+*.apk
+
+# PWA de domiciliarios: la genera el workflow de GitHub Pages
+pharmacy_web/public/courier/*
+!pharmacy_web/public/courier/actualizar.html
+
+# Configuración de Firebase del proyecto real (se inyecta fuera del repo)
+android/app/google-services.json

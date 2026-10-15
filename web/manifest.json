@@ -1,0 +1,35 @@
+{
+    "name": "farmanorte · domiciliarios",
+    "short_name": "farmanorte",
+    "start_url": ".",
+    "display": "standalone",
+    "background_color": "#F3F7FC",
+    "theme_color": "#003399",
+    "description": "Aplicación operativa para domiciliarios y administradores de farmanorte.",
+    "orientation": "portrait-primary",
+    "prefer_related_applications": false,
+    "icons": [
+        {
+            "src": "icons/Icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png"
+        },
+        {
+            "src": "icons/Icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png"
+        },
+        {
+            "src": "icons/Icon-maskable-192.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "maskable"
+        },
+        {
+            "src": "icons/Icon-maskable-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "maskable"
+        }
+    ]
+}

@@ -1,37 +1,68 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:ui' as ui;
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart'
-    show TargetPlatform, defaultTargetPlatform;
+    show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:pdf/pdf.dart' as pdf;
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:signature/signature.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+  // Precalienta el cliente mientras se pinta el login. La autenticación real
+  // sigue siendo obligatoria, pero ya no espera a que el usuario toque el
+  // botón para inicializar Supabase por primera vez.
+  unawaited(SupabaseOperationsService.instance.initialize());
+  unawaited(_startNotifications());
   runApp(const FarmaNorteApp());
+}
+
+/// Carga el sonido elegido antes de crear los canales Android, para que el
+/// canal del sonido seleccionado exista desde el arranque.
+Future<void> _startNotifications() async {
+  try {
+    await AppNotificationAudio.initialize();
+  } catch (_) {}
+  await BackgroundNotificationService.initialize();
 }
 
 class AppColors {
   AppColors._();
-  static const primary = Color(0xFF00BFA6);
-  static const primaryDark = Color(0xFF008F7A);
-  static const mint = Color(0xFFE6FBF7);
+  // FarmaNorte: azul de marca sobre superficies blancas y azul muy claro.
+  // El cambio vive en estos tokens para conservar la estructura actual de la app.
+  static const primary = Color(0xFF003399);
+  static const primaryDark = Color(0xFF002875);
+  static const mint = Color(0xFFEDF4FF);
   static const ink = Color(0xFF14212B);
   static const muted = Color(0xFF6D7B86);
-  static const canvas = Color(0xFFF5F8FA);
-  static const line = Color(0xFFE3EAED);
+  static const canvas = Color(0xFFF4F7FC);
+  static const line = Color(0xFFDCE6F3);
   static const warning = Color(0xFFF59E0B);
   static const danger = Color(0xFFE55353);
-  static const blue = Color(0xFF3D7FF2);
-  static const violet = Color(0xFF7657D7);
+  static const blue = Color(0xFF4E7FD0);
+  static const pharmacyBlue = Color(0xFF003399);
+  static const pharmacyBlueDeep = Color(0xFF003399);
+  static const pharmacyBlueSoft = Color(0xFFEDF4FF);
+  static const pharmacyCanvas = Color(0xFFF3F7FC);
+  // Secondary blue for purchase states; avoids introducing a purple accent.
+  static const violet = Color(0xFF6688C9);
 }
 
 class MapsConfig {
@@ -42,8 +73,193 @@ class MapsConfig {
   static const monteria = LatLng(8.7575, -75.8857);
 }
 
+const farmanorteBrandName = 'farmanorte';
 const farmanorteSupportName = 'Andrés Vargas';
 const farmanorteSupportPhone = '3045530618';
+
+class CourierAlertSoundOption {
+  const CourierAlertSoundOption({
+    required this.id,
+    required this.label,
+    required this.description,
+    required this.assetPath,
+    required this.androidRawSound,
+  });
+
+  final String id;
+  final String label;
+  final String description;
+  final String assetPath;
+
+  /// Copia del sonido en `android/app/src/main/res/raw`. Los canales de
+  /// Android solo pueden sonar con recursos nativos, no con assets de Flutter.
+  final String androidRawSound;
+}
+
+const courierAlertSoundOptions = <CourierAlertSoundOption>[
+  CourierAlertSoundOption(
+    id: 'fast_ping',
+    label: 'Fast ping',
+    description: 'Tono enviado para las alertas nuevas.',
+    assetPath: 'sounds/fast-ping-notification.mp3',
+    androidRawSound: 'fast_ping_notification',
+  ),
+  CourierAlertSoundOption(
+    id: 'delivery_alert',
+    label: 'Alerta de domicilio',
+    description: 'Tono de operación de farmanorte.',
+    assetPath: 'sounds/delivery-alert.mp3',
+    androidRawSound: 'delivery_alert',
+  ),
+  CourierAlertSoundOption(
+    id: 'message_alert',
+    label: 'Mensaje',
+    description: 'Tono corto para chat nuevo.',
+    assetPath: 'sounds/message-alert.mp3',
+    androidRawSound: 'message_alert',
+  ),
+  CourierAlertSoundOption(
+    id: 'koiroylers_shop',
+    label: 'Tienda',
+    description: 'Tono alternativo para un domicilio nuevo.',
+    assetPath: 'sounds/koiroylers-shop-notification-355746.mp3',
+    androidRawSound: 'koiroylers_shop_notification',
+  ),
+  CourierAlertSoundOption(
+    id: 'akshai_orders',
+    label: 'Pedidos',
+    description: 'Tono alternativo para alertas de pedidos nuevos.',
+    assetPath: 'sounds/akshai26-notification-for-orders-313025.mp3',
+    androidRawSound: 'akshai_orders_notification',
+  ),
+];
+
+class AppNotificationAudio {
+  AppNotificationAudio._();
+
+  static final AudioPlayer _player = AudioPlayer();
+  static const _preferenceKey = 'courier_alert_sound_id';
+  static const _enabledPreferenceKey = 'courier_alert_sound_enabled';
+  static const _volumePreferenceKey = 'courier_alert_sound_volume';
+  static String _selectedSoundId = 'fast_ping';
+  static bool _enabled = true;
+  static double _volume = .8;
+
+  static bool get enabled => _enabled;
+  static double get volume => _volume;
+
+  static CourierAlertSoundOption get selectedSound =>
+      courierAlertSoundOptions.firstWhere(
+        (option) => option.id == _selectedSoundId,
+        orElse: () => courierAlertSoundOptions.first,
+      );
+
+  static CourierAlertSoundOption soundById(String id) =>
+      courierAlertSoundOptions.firstWhere(
+        (option) => option.id == id,
+        orElse: () => courierAlertSoundOptions.first,
+      );
+
+  static final Map<String, DateTime> _recentAlerts = {};
+  static const _alertDedupeWindow = Duration(seconds: 30);
+
+  /// Evita que el mismo domicilio suene dos veces cuando la app está abierta
+  /// (una vez por el push y otra por la escucha en tiempo real). Devuelve
+  /// `true` solo para el primer aviso de esa clave dentro de la ventana.
+  static bool claimAlert(String key) {
+    final now = DateTime.now();
+    _recentAlerts.removeWhere(
+      (_, at) => now.difference(at) > _alertDedupeWindow,
+    );
+    if (_recentAlerts.containsKey(key)) return false;
+    _recentAlerts[key] = now;
+    return true;
+  }
+
+  /// Suena una sola vez aunque el push y el tiempo real lleguen juntos.
+  static Future<void> playDeliveryAlertFor(
+    Iterable<String> deliveryIds, {
+    required bool assigned,
+  }) {
+    var firstTime = false;
+    for (final id in deliveryIds) {
+      final kind = assigned ? 'assigned' : 'newDelivery';
+      if (claimAlert('delivery:$kind:$id')) firstTime = true;
+    }
+    return firstTime ? playDeliveryAlert() : Future.value();
+  }
+
+  static CourierAlertSoundOption get messageSound =>
+      courierAlertSoundOptions.firstWhere(
+        (option) => option.id == 'message_alert',
+        orElse: () => courierAlertSoundOptions.first,
+      );
+
+  static Future<void> initialize() async {
+    final preferences = await SharedPreferences.getInstance();
+    _selectedSoundId = preferences.getString(_preferenceKey) ?? 'fast_ping';
+    _enabled = preferences.getBool(_enabledPreferenceKey) ?? true;
+    _volume = (preferences.getDouble(_volumePreferenceKey) ?? .8)
+        .clamp(.1, 1.0)
+        .toDouble();
+  }
+
+  static Future<void> selectSound(String id) async {
+    final option = courierAlertSoundOptions.firstWhere(
+      (candidate) => candidate.id == id,
+      orElse: () => courierAlertSoundOptions.first,
+    );
+    final changed = _selectedSoundId != option.id;
+    _selectedSoundId = option.id;
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(_preferenceKey, option.id);
+    // El sonido de un canal Android es fijo: al cambiarlo se crean los
+    // canales del nuevo sonido para que también suene con la app cerrada.
+    if (changed) unawaited(BackgroundNotificationService.applySelectedSound());
+  }
+
+  static Future<void> setEnabled(bool value) async {
+    _enabled = value;
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setBool(_enabledPreferenceKey, value);
+  }
+
+  static Future<void> setVolume(double value) async {
+    _volume = value.clamp(.1, 1.0).toDouble();
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setDouble(_volumePreferenceKey, _volume);
+  }
+
+  static Future<void> playDeliveryAlert() => _play(selectedSound.assetPath);
+
+  static Future<void> playMessageAlert() => _play(messageSound.assetPath);
+
+  static Future<void> preview(String id) async {
+    final option = courierAlertSoundOptions.firstWhere(
+      (candidate) => candidate.id == id,
+      orElse: () => courierAlertSoundOptions.first,
+    );
+    await _play(option.assetPath, vibrate: false, force: true);
+  }
+
+  static Future<void> _play(
+    String assetPath, {
+    bool vibrate = true,
+    bool force = false,
+  }) async {
+    if (!_enabled && !force) return;
+    try {
+      await _player.stop();
+      await _player.setVolume(_volume);
+      await _player.play(AssetSource(assetPath), volume: _volume);
+      if (vibrate) await HapticFeedback.mediumImpact();
+    } catch (_) {
+      // La alerta visual y el flujo operativo siguen funcionando si el audio
+      // está silenciado o la plataforma no tiene salida de sonido.
+    }
+  }
+}
+
 const courierBasePharmacyCode = String.fromEnvironment(
   'FARMANORTE_BASE_PHARMACY_CODE',
 );
@@ -56,30 +272,72 @@ String normalizeAuthIdentifier(String value) {
   return normalized.contains('@') ? normalized : '$normalized@farmanorte.local';
 }
 
+String formatPharmacyDisplay(String code) {
+  final normalized = code.trim();
+  final compactCode = normalized.toUpperCase().startsWith('FN ')
+      ? normalized.substring(3).trim()
+      : normalized;
+  return compactCode.isEmpty ? 'farmanorte' : 'farmanorte $compactCode';
+}
+
+String formatPharmacyCodeLabel(dynamic code) {
+  final normalized = '$code'.trim();
+  if (normalized.isEmpty || normalized == 'null') return 'FN';
+  final compactCode = normalized.toUpperCase().startsWith('FN ')
+      ? normalized.substring(3).trim()
+      : normalized;
+  return 'FN ${compactCode.toUpperCase()}';
+}
+
+String formatDeliveryPublicCode(dynamic value) {
+  final raw = '$value'.trim();
+  if (raw.isEmpty || raw == 'null') return '';
+  final compact = raw.toUpperCase().replaceAll(RegExp(r'[\s_-]+'), '');
+  return RegExp(r'^FN\d{4,}$').hasMatch(compact) ? compact : raw.toUpperCase();
+}
+
 class FirebaseConfig {
   FirebaseConfig._();
 
-  // Se completan mediante --dart-define para no guardar credenciales de un
-  // proyecto concreto dentro del código fuente de la aplicación.
+  // La configuración cliente web de Firebase (API key, app ID, sender y
+  // project ID) es pública por diseño; la autorización depende de Auth/RLS.
+  // La clave privada FCM nunca se incluye aquí: vive solo en Supabase Secrets.
+  static const webApiKey = 'AIzaSyDWuuoCCc430zTLnsi5zTJYSLhYCwcYdCc';
+  static const webAppId = '1:348754050469:web:b265fc86d2172127a73c4c';
   static const commonApiKey = String.fromEnvironment('FIREBASE_API_KEY');
+  // Configuración pública de la aplicación Android registrada en Firebase.
+  // También puede reemplazarse en una compilación mediante --dart-define.
   static const androidApiKey = String.fromEnvironment(
     'FIREBASE_ANDROID_API_KEY',
+    defaultValue: 'AIzaSyBxHp_5Wg9QAovkvQlavbyWQ_iklhFBieQ',
   );
   static const iosApiKey = String.fromEnvironment('FIREBASE_IOS_API_KEY');
   static const commonAppId = String.fromEnvironment('FIREBASE_APP_ID');
-  static const androidAppId = String.fromEnvironment('FIREBASE_ANDROID_APP_ID');
+  static const androidAppId = String.fromEnvironment(
+    'FIREBASE_ANDROID_APP_ID',
+    defaultValue: '1:348754050469:android:debae16e4f6cd842a73c4c',
+  );
   static const iosAppId = String.fromEnvironment('FIREBASE_IOS_APP_ID');
+  static const webVapidKey = String.fromEnvironment('FIREBASE_WEB_VAPID_KEY');
   static const messagingSenderId = String.fromEnvironment(
     'FIREBASE_MESSAGING_SENDER_ID',
+    defaultValue: '348754050469',
   );
-  static const projectId = String.fromEnvironment('FIREBASE_PROJECT_ID');
+  static const projectId = String.fromEnvironment(
+    'FIREBASE_PROJECT_ID',
+    defaultValue: 'farmanorte-notificaciones',
+  );
   static const databaseUrl = String.fromEnvironment('FIREBASE_DATABASE_URL');
 
-  static String get apiKey => defaultTargetPlatform == TargetPlatform.iOS
+  static String get apiKey => kIsWeb
+      ? webApiKey
+      : defaultTargetPlatform == TargetPlatform.iOS
       ? (iosApiKey.isEmpty ? commonApiKey : iosApiKey)
       : (androidApiKey.isEmpty ? commonApiKey : androidApiKey);
 
-  static String get appId => defaultTargetPlatform == TargetPlatform.iOS
+  static String get appId => kIsWeb
+      ? webAppId
+      : defaultTargetPlatform == TargetPlatform.iOS
       ? (iosAppId.isEmpty ? commonAppId : iosAppId)
       : (androidAppId.isEmpty ? commonAppId : androidAppId);
 
@@ -90,13 +348,824 @@ class FirebaseConfig {
       projectId.isNotEmpty &&
       databaseUrl.isNotEmpty;
 
+  static bool get messagingConfigured =>
+      apiKey.isNotEmpty &&
+      appId.isNotEmpty &&
+      messagingSenderId.isNotEmpty &&
+      projectId.isNotEmpty;
+
   static FirebaseOptions get options => FirebaseOptions(
     apiKey: apiKey,
     appId: appId,
     messagingSenderId: messagingSenderId,
     projectId: projectId,
-    databaseURL: databaseUrl,
+    databaseURL: databaseUrl.isEmpty ? null : databaseUrl,
   );
+}
+
+class PushNotificationAction {
+  const PushNotificationAction({
+    required this.type,
+    required this.deliveryId,
+    this.openChat = false,
+  });
+
+  final String type;
+  final String deliveryId;
+  final bool openChat;
+}
+
+class AppNotificationNavigation {
+  AppNotificationNavigation._();
+
+  static final pending = ValueNotifier<PushNotificationAction?>(null);
+
+  static void publish(PushNotificationAction? action) {
+    if (action == null || action.deliveryId.trim().isEmpty) return;
+    pending.value = action;
+  }
+}
+
+/// Recepción push para cuando la APK está minimizada o el proceso fue cerrado
+/// normalmente. El sistema operativo sigue siendo quien decide cuándo puede
+/// despertar la app: una detención forzada desde Ajustes no puede saltarse.
+@pragma('vm:entry-point')
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  WidgetsFlutterBinding.ensureInitialized();
+  if (!FirebaseConfig.messagingConfigured) return;
+  // Si el mensaje trae el bloque `notification`, Android ya lo mostró en la
+  // bandeja con el canal indicado por el servidor. Mostrarlo otra vez desde
+  // aquí generaba una segunda notificación duplicada.
+  if (message.notification != null) return;
+  try {
+    await AppNotificationAudio.initialize();
+  } catch (_) {}
+  await BackgroundNotificationService.initialize(listenForMessages: false);
+  await BackgroundNotificationService.showRemoteMessage(
+    message,
+    foreground: false,
+  );
+}
+
+enum NotificationPermissionStatus { unknown, granted, denied }
+
+enum PushAlertKind { newDelivery, assigned, chat }
+
+class BackgroundNotificationService {
+  BackgroundNotificationService._();
+
+  static final _localNotifications = FlutterLocalNotificationsPlugin();
+
+  /// Estado del permiso del sistema. La interfaz lo usa para mostrar el aviso
+  /// "Activa las notificaciones" con acceso directo a los ajustes del sistema.
+  static final permissionStatus = ValueNotifier<NotificationPermissionStatus>(
+    NotificationPermissionStatus.unknown,
+  );
+
+  static Future<bool>? _initializing;
+  static bool _firebaseReady = false;
+  static bool _localReady = false;
+  static bool _listenersAttached = false;
+  static bool _launchDetailsHandled = false;
+  static StreamSubscription<RemoteMessage>? _foregroundSubscription;
+  static StreamSubscription<RemoteMessage>? _openedSubscription;
+  static StreamSubscription<String>? _tokenRefreshSubscription;
+  static String? _registeredToken;
+  static bool _askedThisSession = false;
+  static Future<bool>? _permissionRequestInFlight;
+
+  static const _notificationIcon = 'ic_notification';
+
+  // Canales v3. Los canales v2 se crearon con un sonido `res/raw` que el
+  // reductor de recursos había eliminado del APK, por lo que quedaron sin
+  // sonido válido; Android no permite corregir un canal existente, así que se
+  // eliminan y se reemplazan. El id incluye el sonido elegido porque el sonido
+  // de un canal tampoco se puede cambiar después de creado.
+  static const _legacyChannelIds = [
+    'farmanorte_operations_v2',
+    'farmanorte_messages_v2',
+  ];
+  static const defaultSoundId = 'fast_ping';
+  static const chatChannelId = 'fn_chat_v3';
+  static const silentChannelId = 'fn_silent_v3';
+
+  /// Debe coincidir con `default_notification_channel_id` del
+  /// AndroidManifest: es el canal que usa Android cuando el servidor envía un
+  /// canal que no existe en el teléfono.
+  static const defaultChannelId = 'fn_new_delivery_fast_ping_v3';
+
+  static String newDeliveryChannelId(String soundId) =>
+      'fn_new_delivery_${soundId}_v3';
+
+  static String assignedChannelId(String soundId) =>
+      'fn_assigned_${soundId}_v3';
+
+  static AndroidFlutterLocalNotificationsPlugin? get _android =>
+      _localNotifications
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
+
+  static bool get _isAndroid =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+
+  static Future<bool> initialize({bool listenForMessages = true}) {
+    if (!FirebaseConfig.messagingConfigured) return Future.value(false);
+    if (_firebaseReady &&
+        _localReady &&
+        (!listenForMessages || _listenersAttached)) {
+      return Future.value(true);
+    }
+    final current = _initializing;
+    if (current != null) return current;
+    final initialization = _initialize(listenForMessages: listenForMessages);
+    _initializing = initialization;
+    return initialization.whenComplete(() => _initializing = null);
+  }
+
+  static Future<bool> _ensureFirebase() async {
+    if (_firebaseReady) return true;
+    try {
+      if (Firebase.apps.isEmpty) {
+        await Firebase.initializeApp(options: FirebaseConfig.options);
+      }
+      _firebaseReady = true;
+    } catch (error) {
+      try {
+        Firebase.app();
+        _firebaseReady = true;
+      } catch (_) {
+        debugPrint('Notificaciones: Firebase no se pudo inicializar: $error');
+      }
+    }
+    return _firebaseReady;
+  }
+
+  static Future<bool> _initialize({required bool listenForMessages}) async {
+    if (!await _ensureFirebase()) return false;
+
+    // 1. Escuchas de FCM. Van primero y no dependen de las notificaciones
+    // locales: antes, un fallo del ícono impedía registrar la apertura al
+    // tocar la notificación.
+    if (listenForMessages && !_listenersAttached) {
+      _listenersAttached = true;
+      _foregroundSubscription ??= FirebaseMessaging.onMessage.listen((message) {
+        unawaited(showRemoteMessage(message, foreground: true));
+      });
+      _openedSubscription ??= FirebaseMessaging.onMessageOpenedApp.listen(
+        _publishRemoteAction,
+      );
+      try {
+        final initialMessage = await FirebaseMessaging.instance
+            .getInitialMessage();
+        if (initialMessage != null) _publishRemoteAction(initialMessage);
+      } catch (error) {
+        debugPrint('Notificaciones: no se leyó el mensaje inicial: $error');
+      }
+    }
+
+    // 2. Notificaciones locales y canales Android.
+    if (!_localReady) {
+      try {
+        final initialized = await _localNotifications.initialize(
+          settings: const InitializationSettings(
+            android: AndroidInitializationSettings(_notificationIcon),
+            iOS: DarwinInitializationSettings(),
+          ),
+          onDidReceiveNotificationResponse: _onLocalNotificationResponse,
+        );
+        _localReady = initialized != false;
+      } catch (error, stackTrace) {
+        debugPrint('Notificaciones locales no disponibles: $error');
+        debugPrintStack(stackTrace: stackTrace);
+      }
+      if (_localReady) await _ensureAndroidChannels();
+    }
+
+    if (_localReady && listenForMessages && !_launchDetailsHandled) {
+      _launchDetailsHandled = true;
+      try {
+        final launchDetails = await _localNotifications
+            .getNotificationAppLaunchDetails();
+        final response = launchDetails?.notificationResponse;
+        if (launchDetails?.didNotificationLaunchApp == true &&
+            response != null) {
+          _publishPayload(response.payload);
+        }
+      } catch (_) {}
+    }
+    return _localReady;
+  }
+
+  static Future<void> _createChannel(
+    AndroidFlutterLocalNotificationsPlugin android,
+    AndroidNotificationChannel channel,
+  ) async {
+    try {
+      await android.createNotificationChannel(channel);
+    } catch (error) {
+      debugPrint('Notificaciones: no se creó el canal ${channel.id}: $error');
+    }
+  }
+
+  static Future<void> _ensureAndroidChannels() async {
+    if (!_isAndroid) return;
+    final android = _android;
+    if (android == null) return;
+
+    for (final legacyId in _legacyChannelIds) {
+      try {
+        await android.deleteNotificationChannel(channelId: legacyId);
+      } catch (_) {}
+    }
+
+    final selectedId = AppNotificationAudio.selectedSound.id;
+    final activeSoundIds = {defaultSoundId, selectedId};
+    for (final option in courierAlertSoundOptions) {
+      if (activeSoundIds.contains(option.id)) continue;
+      // Libera los canales de sonidos que ya no están seleccionados.
+      try {
+        await android.deleteNotificationChannel(
+          channelId: newDeliveryChannelId(option.id),
+        );
+        await android.deleteNotificationChannel(
+          channelId: assignedChannelId(option.id),
+        );
+      } catch (_) {}
+    }
+
+    for (final soundId in activeSoundIds) {
+      final option = AppNotificationAudio.soundById(soundId);
+      final suffix = soundId == defaultSoundId && selectedId != defaultSoundId
+          ? ' (respaldo)'
+          : '';
+      await _createChannel(
+        android,
+        AndroidNotificationChannel(
+          newDeliveryChannelId(soundId),
+          'Domicilios nuevos$suffix',
+          description: 'Un domicilio nuevo está disponible para aceptar.',
+          importance: Importance.max,
+          playSound: true,
+          sound: RawResourceAndroidNotificationSound(option.androidRawSound),
+          enableVibration: true,
+        ),
+      );
+      await _createChannel(
+        android,
+        AndroidNotificationChannel(
+          assignedChannelId(soundId),
+          'Domicilios asignados$suffix',
+          description: 'La farmacia te asignó un domicilio directamente.',
+          importance: Importance.max,
+          playSound: true,
+          sound: RawResourceAndroidNotificationSound(option.androidRawSound),
+          enableVibration: true,
+        ),
+      );
+    }
+
+    await _createChannel(
+      android,
+      AndroidNotificationChannel(
+        chatChannelId,
+        'Mensajes del chat',
+        description: 'Mensajes nuevos del chat de un domicilio.',
+        importance: Importance.max,
+        playSound: true,
+        sound: RawResourceAndroidNotificationSound(
+          AppNotificationAudio.messageSound.androidRawSound,
+        ),
+        enableVibration: true,
+      ),
+    );
+    await _createChannel(
+      android,
+      const AndroidNotificationChannel(
+        silentChannelId,
+        'Alertas ya avisadas en pantalla',
+        description:
+            'Se usa cuando la app abierta ya sonó por el mismo domicilio.',
+        importance: Importance.high,
+        playSound: false,
+        enableVibration: false,
+      ),
+    );
+  }
+
+  /// Se llama al cambiar el sonido en Configuración: crea los canales del
+  /// sonido elegido y actualiza el registro del dispositivo.
+  static Future<void> applySelectedSound() async {
+    if (!FirebaseConfig.messagingConfigured) return;
+    if (_localReady) {
+      await _ensureAndroidChannels();
+    } else {
+      await initialize(listenForMessages: false);
+    }
+    final token = _registeredToken;
+    if (token != null &&
+        SupabaseConfig.isConfigured &&
+        SupabaseOperationsService.instance.hasAuthenticatedUser) {
+      try {
+        await _saveToken(token);
+      } catch (error) {
+        debugPrint('Notificaciones: no se actualizó el sonido: $error');
+      }
+    }
+  }
+
+  /// Lee el permiso actual sin mostrar ningún diálogo.
+  static Future<NotificationPermissionStatus> refreshPermissionStatus() async {
+    var status = NotificationPermissionStatus.unknown;
+    try {
+      if (_isAndroid) {
+        final enabled = await _android?.areNotificationsEnabled();
+        if (enabled != null) {
+          status = enabled
+              ? NotificationPermissionStatus.granted
+              : NotificationPermissionStatus.denied;
+        }
+      } else if (FirebaseConfig.messagingConfigured &&
+          await _ensureFirebase()) {
+        final settings = await FirebaseMessaging.instance
+            .getNotificationSettings();
+        status = switch (settings.authorizationStatus) {
+          AuthorizationStatus.authorized || AuthorizationStatus.provisional =>
+            NotificationPermissionStatus.granted,
+          AuthorizationStatus.denied => NotificationPermissionStatus.denied,
+          _ => NotificationPermissionStatus.unknown,
+        };
+      }
+    } catch (_) {
+      status = NotificationPermissionStatus.unknown;
+    }
+    permissionStatus.value = status;
+    return status;
+  }
+
+  /// Abre los ajustes de notificaciones de la app (Android 8+), para cuando el
+  /// usuario negó el permiso y Android ya no vuelve a mostrar el diálogo.
+  static Future<bool> openNotificationSettings() async {
+    try {
+      if (_isAndroid) {
+        return await _android?.openAppNotificationSettings() ?? false;
+      }
+    } catch (error) {
+      debugPrint('Notificaciones: no se abrieron los ajustes: $error');
+    }
+    return false;
+  }
+
+  /// Solicita el permiso del sistema. Android 13+ y iOS requieren esta
+  /// decisión del usuario para mostrar alertas en segundo plano.
+  static Future<bool> requestPermissionForEntry() {
+    if (!FirebaseConfig.messagingConfigured) return Future.value(false);
+    if (kIsWeb && FirebaseConfig.webVapidKey.trim().isEmpty) {
+      return Future.value(false);
+    }
+
+    final running = _permissionRequestInFlight;
+    if (running != null) return running;
+
+    final request = _requestPermissionForEntry();
+    _permissionRequestInFlight = request;
+    return request.whenComplete(() {
+      if (identical(_permissionRequestInFlight, request)) {
+        _permissionRequestInFlight = null;
+      }
+    });
+  }
+
+  static Future<bool> _requestPermissionForEntry() async {
+    try {
+      final current = await refreshPermissionStatus();
+      if (current == NotificationPermissionStatus.granted) {
+        unawaited(initialize());
+        return true;
+      }
+      // Un mismo arranque no insiste con el diálogo: si el usuario lo negó,
+      // la app muestra el aviso con el botón para abrir los ajustes.
+      if (_askedThisSession) return false;
+
+      final startedAt = DateTime.now();
+      var granted = false;
+      if (_isAndroid) {
+        // En Android se usa una sola solicitud (la del plugin local). Antes se
+        // pedía dos veces seguidas (Firebase y luego el plugin local) y la
+        // segunda podía cancelarse si la primera seguía abierta.
+        final android = _android;
+        // Sin el plugin nativo (por ejemplo, en pruebas) no hay decisión del
+        // usuario que registrar.
+        if (android == null) return false;
+        granted = await android.requestNotificationsPermission() ?? false;
+      } else {
+        if (!await _ensureFirebase()) return false;
+        final settings = await FirebaseMessaging.instance.requestPermission(
+          alert: true,
+          badge: true,
+          sound: true,
+          provisional: false,
+        );
+        granted =
+            settings.authorizationStatus == AuthorizationStatus.authorized ||
+            settings.authorizationStatus == AuthorizationStatus.provisional;
+      }
+
+      // Si la respuesta llegó casi de inmediato, el diálogo no se mostró
+      // (otra solicitud de permiso en curso o un rechazo permanente). En ese
+      // caso no se marca como preguntado para poder reintentar al iniciar
+      // sesión o al volver a la app.
+      final elapsed = DateTime.now().difference(startedAt);
+      if (granted || elapsed >= const Duration(milliseconds: 700)) {
+        _askedThisSession = true;
+      }
+      permissionStatus.value = granted
+          ? NotificationPermissionStatus.granted
+          : NotificationPermissionStatus.denied;
+      if (granted) unawaited(initialize());
+      return granted;
+    } catch (error, stackTrace) {
+      // Un fallo transitorio (por ejemplo, la Activity todavía no estaba
+      // lista) no cuenta como respuesta del usuario: se reintenta luego.
+      debugPrint('No se pudo solicitar permiso de notificaciones: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      return false;
+    }
+  }
+
+  static Future<void> registerForCurrentUser() async {
+    if (!FirebaseConfig.messagingConfigured || !SupabaseConfig.isConfigured) {
+      return;
+    }
+    final allowed = await requestPermissionForEntry();
+
+    try {
+      if (!await _ensureFirebase()) return;
+      unawaited(initialize());
+      final messaging = FirebaseMessaging.instance;
+      await messaging.setAutoInitEnabled(true);
+
+      String? token;
+      if (kIsWeb) {
+        // En la PWA el navegador solo entrega el token con permiso concedido.
+        if (!allowed || FirebaseConfig.webVapidKey.trim().isEmpty) return;
+        token = await messaging.getToken(
+          vapidKey: FirebaseConfig.webVapidKey,
+          serviceWorkerScriptPath: 'push/firebase-messaging-sw.js',
+        );
+      } else {
+        // En Android el token se registra aunque el permiso esté pendiente:
+        // en cuanto el usuario lo active, las alertas llegan sin otro login.
+        token = await messaging.getToken();
+      }
+      if (token != null && token.trim().isNotEmpty) {
+        _registeredToken = token;
+        await _saveToken(token);
+      } else {
+        debugPrint('Notificaciones: Firebase no entregó token FCM.');
+      }
+
+      _tokenRefreshSubscription ??= messaging.onTokenRefresh.listen((token) {
+        if (token.trim().isEmpty) return;
+        _registeredToken = token;
+        unawaited(
+          _saveToken(token).catchError((Object error) {
+            debugPrint('Notificaciones: no se renovó el token: $error');
+          }),
+        );
+      });
+    } catch (error) {
+      // Un dispositivo sin Firebase/APNs configurado no debe bloquear el
+      // inicio de sesión ni la operación en primer plano.
+      debugPrint('Notificaciones: no se pudo registrar el token FCM: $error');
+    }
+  }
+
+  static Future<void> _saveToken(String token) =>
+      SupabaseOperationsService.instance.upsertPushToken(
+        token: token,
+        platform: _platformName,
+        alertSound: AppNotificationAudio.selectedSound.id,
+      );
+
+  static Future<void> unregisterCurrentDevice() async {
+    var token = _registeredToken;
+    _registeredToken = null;
+    _askedThisSession = false;
+    if ((token == null || token.isEmpty) && !kIsWeb && _firebaseReady) {
+      try {
+        token = await FirebaseMessaging.instance.getToken();
+      } catch (_) {}
+    }
+    if (token == null || token.isEmpty) return;
+    try {
+      await SupabaseOperationsService.instance.removePushToken(token);
+    } catch (_) {}
+  }
+
+  static String get _platformName => kIsWeb
+      ? 'web'
+      : defaultTargetPlatform == TargetPlatform.iOS
+      ? 'ios'
+      : 'android';
+
+  static PushAlertKind _kindFromData(Map<String, dynamic> data) =>
+      switch ('${data['type'] ?? ''}'.trim()) {
+        'chat_message' => PushAlertKind.chat,
+        'delivery_assigned' => PushAlertKind.assigned,
+        _ => PushAlertKind.newDelivery,
+      };
+
+  static String _dataText(Map<String, dynamic> data, String key) {
+    final value = '${data[key] ?? ''}'.trim();
+    return value == 'null' ? '' : value;
+  }
+
+  static Future<void> showRemoteMessage(
+    RemoteMessage message, {
+    bool foreground = true,
+  }) async {
+    if (!await initialize(listenForMessages: false)) return;
+    final data = <String, dynamic>{...message.data};
+    final kind = _kindFromData(data);
+    final action = _actionFromData(data);
+    final deliveryId = action?.deliveryId ?? _dataText(data, 'delivery_id');
+    final code = formatDeliveryPublicCode(_dataText(data, 'public_code'));
+    final pharmacyCode = _dataText(data, 'pharmacy_code');
+    final pharmacy = pharmacyCode.isEmpty
+        ? ''
+        : formatPharmacyDisplay(pharmacyCode);
+    final codeLabel = [
+      code,
+      pharmacy,
+    ].where((part) => part.isNotEmpty).join(' · ');
+
+    final title =
+        message.notification?.title ??
+        (_dataText(data, 'title').isNotEmpty
+            ? _dataText(data, 'title')
+            : switch (kind) {
+                PushAlertKind.chat => 'Nuevo mensaje del domicilio',
+                PushAlertKind.assigned => 'Domicilio asignado',
+                PushAlertKind.newDelivery => 'Nuevo domicilio disponible',
+              });
+    final body =
+        message.notification?.body ??
+        (_dataText(data, 'body').isNotEmpty
+            ? _dataText(data, 'body')
+            : switch (kind) {
+                PushAlertKind.chat =>
+                  '${_dataText(data, 'sender_name').isEmpty ? 'La operación' : _dataText(data, 'sender_name')} te escribió en el chat.',
+                PushAlertKind.assigned =>
+                  '${codeLabel.isEmpty ? 'Domicilio' : codeLabel} · La farmacia te asignó este domicilio.',
+                PushAlertKind.newDelivery =>
+                  codeLabel.isEmpty
+                      ? 'Abre farmanorte para ver y aceptar el domicilio.'
+                      : '$codeLabel · Toca para ver y aceptar.',
+              });
+
+    // Con la app abierta, la escucha en tiempo real también suena. Se usa una
+    // sola alerta por domicilio/mensaje: la que llegue primero.
+    final alertKey = kind == PushAlertKind.chat
+        ? 'chat:${_dataText(data, 'message_id').isEmpty ? message.messageId ?? deliveryId : _dataText(data, 'message_id')}'
+        : 'delivery:${kind.name}:$deliveryId';
+    final firstAlert =
+        !foreground ||
+        deliveryId.isEmpty ||
+        AppNotificationAudio.claimAlert(alertKey);
+    final playSound = firstAlert && AppNotificationAudio.enabled;
+
+    final soundOption = kind == PushAlertKind.chat
+        ? AppNotificationAudio.messageSound
+        : AppNotificationAudio.selectedSound;
+    final channelId = !playSound
+        ? silentChannelId
+        : switch (kind) {
+            PushAlertKind.chat => chatChannelId,
+            PushAlertKind.assigned => assignedChannelId(soundOption.id),
+            PushAlertKind.newDelivery => newDeliveryChannelId(soundOption.id),
+          };
+    final channelName = !playSound
+        ? 'Alertas ya avisadas en pantalla'
+        : switch (kind) {
+            PushAlertKind.chat => 'Mensajes del chat',
+            PushAlertKind.assigned => 'Domicilios asignados',
+            PushAlertKind.newDelivery => 'Domicilios nuevos',
+          };
+
+    // Un id estable por domicilio y tipo evita varias tarjetas del mismo aviso.
+    final notificationKey = kind == PushAlertKind.chat || deliveryId.isEmpty
+        ? (message.messageId ?? '${DateTime.now().millisecondsSinceEpoch}')
+        : '${kind.name}:$deliveryId';
+    final notificationId = notificationKey.hashCode & 0x7fffffff;
+
+    try {
+      await _localNotifications.show(
+        id: notificationId,
+        title: title,
+        body: body,
+        notificationDetails: NotificationDetails(
+          android: AndroidNotificationDetails(
+            channelId,
+            channelName,
+            channelDescription:
+                'Alertas de domicilios y mensajes de farmanorte.',
+            importance: Importance.max,
+            priority: Priority.high,
+            icon: _notificationIcon,
+            color: AppColors.primary,
+            playSound: playSound,
+            enableVibration: playSound,
+            sound: playSound
+                ? RawResourceAndroidNotificationSound(
+                    soundOption.androidRawSound,
+                  )
+                : null,
+            category: kind == PushAlertKind.chat
+                ? AndroidNotificationCategory.message
+                : AndroidNotificationCategory.event,
+            visibility: NotificationVisibility.public,
+            ticker: title,
+            styleInformation: BigTextStyleInformation(body),
+          ),
+          iOS: DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+          web: WebNotificationDetails(
+            iconUrl: Uri.base.resolve('icons/Icon-192.png'),
+            badgeUrl: Uri.base.resolve('icons/Icon-192.png'),
+            renotify: true,
+          ),
+        ),
+        payload: jsonEncode({
+          'type': action?.type ?? data['type'] ?? 'delivery',
+          'delivery_id': deliveryId,
+          'open_chat': action?.openChat ?? kind == PushAlertKind.chat,
+        }),
+      );
+    } catch (error) {
+      debugPrint('Notificaciones: no se pudo mostrar la alerta: $error');
+    }
+  }
+
+  static void _publishRemoteAction(RemoteMessage message) {
+    _publishPayload(jsonEncode(message.data));
+  }
+
+  static void _onLocalNotificationResponse(NotificationResponse response) {
+    _publishPayload(response.payload);
+  }
+
+  static void _publishPayload(String? payload) {
+    if (payload == null || payload.trim().isEmpty) return;
+    try {
+      final decoded = jsonDecode(payload);
+      if (decoded is! Map) return;
+      final action = _actionFromData(Map<String, dynamic>.from(decoded));
+      AppNotificationNavigation.publish(action);
+    } catch (_) {}
+  }
+
+  static PushNotificationAction? _actionFromData(Map<String, dynamic> data) {
+    final deliveryId = '${data['delivery_id'] ?? data['deliveryId'] ?? ''}'
+        .trim();
+    if (deliveryId.isEmpty) return null;
+    final rawType = '${data['type'] ?? 'delivery'}'.trim();
+    final openChat =
+        data['open_chat'] == true ||
+        '${data['open_chat'] ?? ''}'.toLowerCase() == 'true' ||
+        rawType == 'chat_message';
+    return PushNotificationAction(
+      type: rawType,
+      deliveryId: deliveryId,
+      openChat: openChat,
+    );
+  }
+}
+
+/// Aviso visible cuando el sistema tiene las notificaciones desactivadas.
+/// Android deja de mostrar el diálogo después de dos rechazos, así que la única
+/// forma de recuperarlas es abrir los ajustes de la app.
+class NotificationPermissionBanner extends StatefulWidget {
+  const NotificationPermissionBanner({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  State<NotificationPermissionBanner> createState() =>
+      _NotificationPermissionBannerState();
+}
+
+class _NotificationPermissionBannerState
+    extends State<NotificationPermissionBanner>
+    with WidgetsBindingObserver {
+  bool _dismissed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    unawaited(_recheckAfterResume());
+  }
+
+  Future<void> _recheckAfterResume() async {
+    if (!FirebaseConfig.messagingConfigured) return;
+    final previous = BackgroundNotificationService.permissionStatus.value;
+    final status =
+        await BackgroundNotificationService.refreshPermissionStatus();
+    if (status == NotificationPermissionStatus.granted &&
+        previous != NotificationPermissionStatus.granted &&
+        SupabaseConfig.isConfigured &&
+        SupabaseOperationsService.instance.hasAuthenticatedUser) {
+      // El usuario activó el permiso desde Ajustes: se preparan los canales y
+      // se confirma el token sin pedir un nuevo inicio de sesión.
+      unawaited(BackgroundNotificationService.registerForCurrentUser());
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final showBanner =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+    if (!showBanner) return widget.child;
+    return ValueListenableBuilder<NotificationPermissionStatus>(
+      valueListenable: BackgroundNotificationService.permissionStatus,
+      child: widget.child,
+      builder: (context, status, child) {
+        final visible =
+            status == NotificationPermissionStatus.denied && !_dismissed;
+        if (!visible) return child!;
+        return Column(
+          children: [
+            Expanded(child: child!),
+            Material(
+              color: AppColors.primary,
+              child: SafeArea(
+                top: false,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.notifications_off_outlined,
+                        color: Colors.white,
+                        size: 22,
+                      ),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Text(
+                          'Las notificaciones están desactivadas. Actívalas '
+                          'para recibir domicilios nuevos y asignados.',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 12.5,
+                            height: 1.3,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      TextButton(
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.white,
+                        ),
+                        onPressed: () => unawaited(
+                          BackgroundNotificationService.openNotificationSettings(),
+                        ),
+                        child: const Text(
+                          'Activar',
+                          style: TextStyle(fontWeight: FontWeight.w900),
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Ocultar aviso',
+                        color: Colors.white70,
+                        iconSize: 18,
+                        onPressed: () => setState(() => _dismissed = true),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
 }
 
 class SupabaseConfig {
@@ -109,7 +1178,31 @@ class SupabaseConfig {
     'SUPABASE_PUBLISHABLE_KEY',
   );
 
-  static bool get isConfigured => url.isNotEmpty && publishableKey.isNotEmpty;
+  static Uri? get parsedUrl {
+    final candidate = url.trim();
+    if (candidate.isEmpty) return null;
+    final parsed = Uri.tryParse(candidate);
+    if (parsed == null || parsed.host.isEmpty) return null;
+    if (parsed.scheme != 'https' && parsed.scheme != 'http') return null;
+    return parsed;
+  }
+
+  static bool get isConfigured =>
+      parsedUrl != null && publishableKey.trim().isNotEmpty;
+
+  static String get configurationError {
+    if (url.trim().isEmpty) {
+      return 'La APK fue compilada sin SUPABASE_URL.';
+    }
+    if (parsedUrl == null) {
+      return 'La APK fue compilada con una SUPABASE_URL inválida. '
+          'Genera de nuevo la APK usando la URL de Supabase real.';
+    }
+    if (publishableKey.trim().isEmpty) {
+      return 'La APK fue compilada sin SUPABASE_PUBLISHABLE_KEY.';
+    }
+    return 'La configuración de Supabase no está disponible.';
+  }
 }
 
 class SupabaseUserProfile {
@@ -119,6 +1212,7 @@ class SupabaseUserProfile {
     required this.role,
     required this.active,
     this.pharmacyCode,
+    this.mustChangePassword = false,
   });
 
   final String id;
@@ -126,6 +1220,7 @@ class SupabaseUserProfile {
   final String role;
   final bool active;
   final String? pharmacyCode;
+  final bool mustChangePassword;
 
   factory SupabaseUserProfile.fromMap(Map<String, dynamic> row) {
     return SupabaseUserProfile(
@@ -134,9 +1229,303 @@ class SupabaseUserProfile {
       role: '${row['role'] ?? ''}',
       active: row['active'] == true,
       pharmacyCode: row['pharmacy_code']?.toString(),
+      mustChangePassword: row['must_change_password'] == true,
+    );
+  }
+
+  SupabaseUserProfile copyWith({bool? mustChangePassword}) =>
+      SupabaseUserProfile(
+        id: id,
+        fullName: fullName,
+        role: role,
+        active: active,
+        pharmacyCode: pharmacyCode,
+        mustChangePassword: mustChangePassword ?? this.mustChangePassword,
+      );
+}
+
+bool isSupportedOperationsAppRole(String role) =>
+    role == 'admin' || role == 'courier';
+
+String operationsAppAccessMessage(String role) => switch (role) {
+  'pharmacy' =>
+    'Esta cuenta pertenece a una farmacia y no puede entrar a la aplicación '
+        'de domiciliarios. Usa la página web de la farmacia.',
+  'admin' =>
+    'Esta cuenta es administrativa. Entra desde el panel de administración.',
+  'courier' => 'Este domiciliario debe entrar desde la opción Domiciliario.',
+  _ => 'Este usuario no tiene permiso para entrar a esta aplicación.',
+};
+
+class DeliveryChatMessage {
+  const DeliveryChatMessage({
+    required this.id,
+    required this.deliveryId,
+    required this.senderId,
+    required this.senderName,
+    required this.senderRole,
+    required this.body,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String deliveryId;
+  final String senderId;
+  final String senderName;
+  final String senderRole;
+  final String body;
+  final DateTime createdAt;
+
+  factory DeliveryChatMessage.fromMap(Map<String, dynamic> row) {
+    return DeliveryChatMessage(
+      id: '${row['id'] ?? ''}',
+      deliveryId: '${row['delivery_id'] ?? ''}',
+      senderId: '${row['sender_id'] ?? ''}',
+      senderName: '${row['sender_name'] ?? 'Usuario'}',
+      senderRole: '${row['sender_role'] ?? ''}',
+      body: '${row['body'] ?? ''}',
+      createdAt:
+          DateTime.tryParse('${row['created_at'] ?? ''}') ?? DateTime.now(),
     );
   }
 }
+
+class DeliveryEquivalent {
+  const DeliveryEquivalent({
+    required this.id,
+    required this.deliveryId,
+    required this.pharmacyCode,
+    required this.serviceLabel,
+    required this.description,
+    required this.amount,
+    required this.paymentMethod,
+    required this.deliveryStatus,
+    required this.status,
+    required this.createdAt,
+    this.courierId,
+    this.courierName,
+    this.courierSignatureName,
+    this.courierSignatureImage,
+    this.courierSignedAt,
+    this.pharmacyAcknowledgedAt,
+    this.paymentStatus = 'pending',
+    this.paidAt,
+    this.paidAmount,
+    this.metadata = const <String, dynamic>{},
+  });
+
+  final String id;
+  final String deliveryId;
+  final String pharmacyCode;
+  final String serviceLabel;
+  final String description;
+  final double amount;
+  final String paymentMethod;
+  final String deliveryStatus;
+  final String status;
+  final DateTime createdAt;
+  final String? courierId;
+  final String? courierName;
+  final String? courierSignatureName;
+  final String? courierSignatureImage;
+  final DateTime? courierSignedAt;
+  final DateTime? pharmacyAcknowledgedAt;
+  final String paymentStatus;
+  final DateTime? paidAt;
+  final double? paidAmount;
+  final Map<String, dynamic> metadata;
+
+  factory DeliveryEquivalent.fromMap(Map<String, dynamic> row) {
+    final rawMetadata = row['metadata'];
+    return DeliveryEquivalent(
+      id: '${row['id'] ?? ''}',
+      deliveryId: '${row['delivery_id'] ?? ''}',
+      pharmacyCode: '${row['pharmacy_code'] ?? ''}',
+      serviceLabel: '${row['service_label'] ?? 'Servicio'}',
+      description: '${row['description'] ?? ''}',
+      amount: _asDouble(row['amount']),
+      paymentMethod: '${row['payment_method'] ?? 'none'}',
+      deliveryStatus: '${row['delivery_status'] ?? ''}',
+      status: '${row['status'] ?? 'draft'}',
+      createdAt:
+          DateTime.tryParse('${row['created_at'] ?? ''}') ?? DateTime.now(),
+      courierId: row['courier_id']?.toString(),
+      courierName: row['courier_name']?.toString(),
+      courierSignatureName: row['courier_signature_name']?.toString(),
+      courierSignatureImage: row['courier_signature_image']?.toString(),
+      courierSignedAt: DateTime.tryParse('${row['courier_signed_at'] ?? ''}'),
+      pharmacyAcknowledgedAt: DateTime.tryParse(
+        '${row['pharmacy_acknowledged_at'] ?? ''}',
+      ),
+      paymentStatus: '${row['payment_status'] ?? 'pending'}',
+      paidAt: DateTime.tryParse('${row['paid_at'] ?? ''}'),
+      paidAmount: row['paid_amount'] == null
+          ? null
+          : _asDouble(row['paid_amount']),
+      metadata: rawMetadata is Map
+          ? Map<String, dynamic>.from(rawMetadata)
+          : const <String, dynamic>{},
+    );
+  }
+
+  static double _asDouble(dynamic value) {
+    if (value is num) return value.toDouble();
+    return double.tryParse('$value') ?? 0;
+  }
+}
+
+class CourierFeeSummary {
+  const CourierFeeSummary({
+    required this.weekStart,
+    required this.weekEnd,
+    required this.scheduledDays,
+    required this.doubleShiftCount,
+    required this.baseAmount,
+    required this.doubleSurcharge,
+    required this.totalDue,
+    required this.totalPaid,
+    required this.balanceDue,
+    required this.dailyAmount,
+    required this.doubleShiftSurcharge,
+    this.lastPaymentAt,
+  });
+
+  final DateTime weekStart;
+  final DateTime weekEnd;
+  final int scheduledDays;
+  final int doubleShiftCount;
+  final double baseAmount;
+  final double doubleSurcharge;
+  final double totalDue;
+  final double totalPaid;
+  final double balanceDue;
+  final double dailyAmount;
+  final double doubleShiftSurcharge;
+  final DateTime? lastPaymentAt;
+
+  factory CourierFeeSummary.fromMap(Map<String, dynamic> row) {
+    return CourierFeeSummary(
+      weekStart:
+          DateTime.tryParse('${row['week_start'] ?? ''}') ?? _adminToday(),
+      weekEnd: DateTime.tryParse('${row['week_end'] ?? ''}') ?? _adminToday(),
+      scheduledDays: _asInt(row['scheduled_days']),
+      doubleShiftCount: _asInt(row['double_shift_count']),
+      baseAmount: _asDouble(row['base_amount']),
+      doubleSurcharge: _asDouble(row['double_surcharge']),
+      totalDue: _asDouble(row['total_due']),
+      totalPaid: _asDouble(row['total_paid']),
+      balanceDue: _asDouble(row['balance_due'] ?? row['total_due']),
+      dailyAmount: _asDouble(row['daily_amount']),
+      doubleShiftSurcharge: _asDouble(row['double_shift_surcharge']),
+      lastPaymentAt: DateTime.tryParse('${row['last_payment_at'] ?? ''}'),
+    );
+  }
+}
+
+class AdminCourierFeeSummary {
+  const AdminCourierFeeSummary({
+    required this.courierId,
+    required this.courierName,
+    required this.scheduledDays,
+    required this.doubleShiftCount,
+    required this.totalDue,
+    required this.totalPaid,
+    required this.balanceDue,
+    required this.dailyAmount,
+    required this.doubleShiftSurcharge,
+    this.lastPaymentAt,
+  });
+
+  final String courierId;
+  final String courierName;
+  final int scheduledDays;
+  final int doubleShiftCount;
+  final double totalDue;
+  final double totalPaid;
+  final double balanceDue;
+  final double dailyAmount;
+  final double doubleShiftSurcharge;
+  final DateTime? lastPaymentAt;
+
+  factory AdminCourierFeeSummary.fromMap(Map<String, dynamic> row) {
+    return AdminCourierFeeSummary(
+      courierId: '${row['courier_id'] ?? ''}',
+      courierName: '${row['courier_name'] ?? 'Sin nombre'}',
+      scheduledDays: _asInt(row['scheduled_days']),
+      doubleShiftCount: _asInt(row['double_shift_count']),
+      totalDue: _asDouble(row['total_due']),
+      totalPaid: _asDouble(row['total_paid']),
+      balanceDue: _asDouble(row['balance_due'] ?? row['total_due']),
+      dailyAmount: _asDouble(row['daily_amount']),
+      doubleShiftSurcharge: _asDouble(row['double_shift_surcharge']),
+      lastPaymentAt: DateTime.tryParse('${row['last_payment_at'] ?? ''}'),
+    );
+  }
+}
+
+class CourierPharmacyBreakdown {
+  const CourierPharmacyBreakdown({
+    required this.pharmacyCode,
+    required this.pharmacyName,
+    required this.serviceCount,
+    required this.totalEarnings,
+    required this.baseCount,
+    required this.supportCount,
+  });
+
+  final String pharmacyCode;
+  final String pharmacyName;
+  final int serviceCount;
+  final double totalEarnings;
+  final int baseCount;
+  final int supportCount;
+
+  factory CourierPharmacyBreakdown.fromMap(Map<String, dynamic> row) {
+    return CourierPharmacyBreakdown(
+      pharmacyCode: '${row['pharmacy_code'] ?? ''}',
+      pharmacyName: '${row['pharmacy_name'] ?? 'Farmacia'}',
+      serviceCount: _asInt(row['service_count']),
+      totalEarnings: _asDouble(row['total_earnings']),
+      baseCount: _asInt(row['base_count']),
+      supportCount: _asInt(row['support_count']),
+    );
+  }
+}
+
+class PharmacyCourierBreakdown {
+  const PharmacyCourierBreakdown({
+    required this.courierId,
+    required this.courierName,
+    required this.serviceCount,
+    required this.totalEarnings,
+    required this.baseCount,
+    required this.supportCount,
+  });
+
+  final String courierId;
+  final String courierName;
+  final int serviceCount;
+  final double totalEarnings;
+  final int baseCount;
+  final int supportCount;
+
+  factory PharmacyCourierBreakdown.fromMap(Map<String, dynamic> row) {
+    return PharmacyCourierBreakdown(
+      courierId: '${row['courier_id'] ?? ''}',
+      courierName: '${row['courier_name'] ?? 'Domiciliario'}',
+      serviceCount: _asInt(row['service_count']),
+      totalEarnings: _asDouble(row['total_earnings']),
+      baseCount: _asInt(row['base_count']),
+      supportCount: _asInt(row['support_count']),
+    );
+  }
+}
+
+int _asInt(dynamic value) =>
+    value is num ? value.round() : int.tryParse('$value') ?? 0;
+
+double _asDouble(dynamic value) =>
+    value is num ? value.toDouble() : double.tryParse('$value') ?? 0;
 
 class AdminBackendSnapshot {
   const AdminBackendSnapshot({
@@ -279,17 +1668,35 @@ class RealtimeOperationsService {
       MapsConfig.monteria,
     );
     final service = DeliveryServicePlan.fromMap(data, kind: kind);
+    final pickupStops = _pickupStopsFromMap(data['pickupStops']);
+    final crossRoutes = _crossRoutesFromMap(data['pickupStops']);
+    final firstCrossRoute = crossRoutes.isEmpty ? null : crossRoutes.first;
+    final originCode = firstCrossRoute?.originCode;
+    final destinationCode = firstCrossRoute?.destinationCode;
+    final crossOperation = originCode != null && destinationCode != null;
+    final isCrossOnly = crossOperation && !service.hasDomicilio;
+    final displayStoreName = originCode == null
+        ? '${data['storeName'] ?? farmanorteBrandName}'
+        : formatPharmacyCodeLabel(originCode);
+    final displayStoreAddress = originCode == null
+        ? '${data['storeAddress'] ?? 'Dirección por confirmar'}'
+        : formatPharmacyDisplay(originCode);
+    final displayDestination = isCrossOnly
+        ? formatPharmacyCodeLabel(destinationCode)
+        : '${data['destination'] ?? 'Destino por confirmar'}';
+    final displayDestinationAddress = isCrossOnly
+        ? formatPharmacyDisplay(destinationCode)
+        : '${data['destinationAddress'] ?? 'Dirección por confirmar'}';
     final paymentAmount = _doubleValue(data['paymentAmount']);
     final reportedEarnings = _doubleValue(
       data['courierEarnings'] ?? data['earnings'],
     );
     return Delivery(
       id: id,
-      storeName: '${data['storeName'] ?? 'FarmaNorte'}',
-      storeAddress: '${data['storeAddress'] ?? 'Dirección por confirmar'}',
-      destination: '${data['destination'] ?? 'Destino por confirmar'}',
-      destinationAddress:
-          '${data['destinationAddress'] ?? 'Dirección por confirmar'}',
+      storeName: displayStoreName,
+      storeAddress: displayStoreAddress,
+      destination: displayDestination,
+      destinationAddress: displayDestinationAddress,
       recipientName: '${data['recipientName'] ?? 'Cliente'}',
       recipientPhone: '${data['recipientPhone'] ?? 'Sin teléfono'}',
       paymentMethod: payment,
@@ -308,7 +1715,8 @@ class RealtimeOperationsService {
       destinationPoint: destinationPoint,
       service: service,
       productSummary: '${data['productSummary'] ?? 'Productos del pedido'}',
-      pickupStops: _pickupStopsFromMap(data['pickupStops']),
+      pickupStops: pickupStops,
+      crossRoutes: crossRoutes,
       destinationOptions: _addressOptionsFromMap(
         data['destinationOptions'],
         fallback: DeliveryAddress(
@@ -323,6 +1731,8 @@ class RealtimeOperationsService {
       cashExpected: _optionalDouble(data['cashExpected']),
       approvalPending: data['approvalPending'] == true,
       approvalCourierName: data['approvalCourierName']?.toString(),
+      assignedAsSupport: data['assignedAsSupport'] == true,
+      acceptedCourierId: data['acceptedCourierId']?.toString(),
       deliveryOutcome: data['deliveryOutcome']?.toString(),
     );
   }
@@ -333,13 +1743,51 @@ class RealtimeOperationsService {
   List<DeliveryPickupStop> _pickupStopsFromMap(dynamic raw) {
     return _listLike(raw).whereType<Map>().map((item) {
       final data = Map<dynamic, dynamic>.from(item);
+      final origin =
+          data['origin_pharmacy_code'] ??
+          data['originPharmacyCode'] ??
+          data['pharmacy_code'];
+      final destination =
+          data['destination_pharmacy_code'] ?? data['destinationPharmacyCode'];
+      final isCross = origin != null && destination != null;
       return DeliveryPickupStop(
-        title: '${data['title'] ?? data['name'] ?? 'Punto de recogida'}',
-        address: '${data['address'] ?? 'Dirección por confirmar'}',
+        title: isCross
+            ? formatPharmacyCodeLabel(origin)
+            : '${data['title'] ?? data['name'] ?? 'Punto de recogida'}',
+        address: isCross
+            ? formatPharmacyDisplay('$origin')
+            : '${data['address'] ?? 'Dirección por confirmar'}',
         point: _latLngValue(data['point'], MapsConfig.monteria),
-        label: '${data['label'] ?? 'Recoger'}',
+        label: isCross
+            ? 'Cruce: ${formatPharmacyCodeLabel(origin)} → ${formatPharmacyCodeLabel(destination)}'
+            : '${data['label'] ?? 'Recoger'}',
       );
     }).toList();
+  }
+
+  List<DeliveryCrossRoute> _crossRoutesFromMap(dynamic raw) {
+    return _listLike(raw)
+        .whereType<Map>()
+        .map((item) {
+          final data = Map<dynamic, dynamic>.from(item);
+          final origin =
+              data['origin_pharmacy_code'] ??
+              data['originPharmacyCode'] ??
+              data['pharmacy_code'];
+          final destination =
+              data['destination_pharmacy_code'] ??
+              data['destinationPharmacyCode'];
+          if (origin == null || destination == null) return null;
+          final originCode = '$origin'.trim();
+          final destinationCode = '$destination'.trim();
+          if (originCode.isEmpty || destinationCode.isEmpty) return null;
+          return DeliveryCrossRoute(
+            originCode: originCode,
+            destinationCode: destinationCode,
+          );
+        })
+        .whereType<DeliveryCrossRoute>()
+        .toList();
   }
 
   List<DeliveryAddress> _addressOptionsFromMap(
@@ -403,9 +1851,17 @@ class SupabaseOperationsService {
 
   SupabaseClient? _client;
   Future<bool>? _initializing;
+  String? _profileSchemaWarning;
 
   bool get isReady => _client != null;
   bool get hasAuthenticatedUser => _client?.auth.currentUser != null;
+  String? get currentUserId => _client?.auth.currentUser?.id;
+
+  /// Se completa únicamente cuando el proyecto remoto todavía no tiene la
+  /// migración de la política de contraseñas temporales. No reemplaza la
+  /// migración: sirve para que una APK actualizada pueda identificar el perfil
+  /// existente mientras el administrador aplica la reparación en Supabase.
+  String? get profileSchemaWarning => _profileSchemaWarning;
 
   Future<AuthResponse> signInWithPassword({
     required String email,
@@ -424,13 +1880,47 @@ class SupabaseOperationsService {
     if (!await initialize()) return null;
     final user = _client!.auth.currentUser;
     if (user == null) return null;
-    final row = await _client!
-        .from('profiles')
-        .select('id, full_name, role, pharmacy_code, active')
-        .eq('id', user.id)
-        .maybeSingle();
+    Map<String, dynamic>? row;
+    try {
+      row = await _client!
+          .from('profiles')
+          .select(
+            'id, full_name, role, pharmacy_code, active, must_change_password',
+          )
+          .eq('id', user.id)
+          .maybeSingle();
+      _profileSchemaWarning = null;
+    } catch (error) {
+      if (!_isMissingMustChangePasswordColumn(error)) rethrow;
+
+      // Algunas instalaciones del proyecto todavía tienen el esquema previo
+      // a la migración 021. Reintentamos solo las columnas base para que el
+      // usuario no quede atrapado en una pantalla de error; la migración de
+      // reparación vuelve a habilitar la política de contraseña temporal.
+      _profileSchemaWarning =
+          'Supabase necesita aplicar la migración de contraseñas temporales.';
+      row = await _client!
+          .from('profiles')
+          .select('id, full_name, role, pharmacy_code, active')
+          .eq('id', user.id)
+          .maybeSingle();
+    }
     if (row == null) return null;
     return SupabaseUserProfile.fromMap(row);
+  }
+
+  bool _isMissingMustChangePasswordColumn(Object error) {
+    final text = '$error';
+    return text.contains('42703') &&
+        text.contains('profiles.must_change_password');
+  }
+
+  Future<void> completePasswordChange({required String password}) async {
+    if (!await initialize() || !hasAuthenticatedUser) {
+      throw StateError('La sesión real de Supabase no está disponible.');
+    }
+    await _client!.auth.updateUser(UserAttributes(password: password));
+    await _client!.rpc('complete_password_change');
   }
 
   Future<AdminBackendSnapshot> loadAdminSnapshot() async {
@@ -448,13 +1938,19 @@ class SupabaseOperationsService {
         .order('code');
     final profileRows = await _client!
         .from('profiles')
-        .select('id, username, full_name, role, pharmacy_code, active')
+        .select('id, username, full_name, role, pharmacy_code, phone, active')
         .order('full_name');
+    final pharmacyProfileRows = await _client!
+        .from('pharmacy_profiles')
+        .select(
+          'id, pharmacy_code, display_name, username, profile_role, active',
+        )
+        .order('display_name');
     final shiftRows = await _client!
         .from('shifts')
         .select(
           'id, courier_id, pharmacy_code, zone_id, scheduled_for, '
-          'starts_at, ends_at, is_double, status',
+          'starts_at, ends_at, is_double, status, assignment_type',
         )
         .order('scheduled_for')
         .order('starts_at');
@@ -502,18 +1998,40 @@ class SupabaseOperationsService {
       );
     }
 
+    final pharmacyProfilesByCode = <String, List<AdminPharmacyProfile>>{};
+    for (final row in pharmacyProfileRows) {
+      final code = '${row['pharmacy_code'] ?? ''}'.trim();
+      if (code.isEmpty) continue;
+      pharmacyProfilesByCode
+          .putIfAbsent(code, () => <AdminPharmacyProfile>[])
+          .add(
+            AdminPharmacyProfile(
+              id: '${row['id'] ?? ''}',
+              displayName: '${row['display_name'] ?? ''}',
+              username: '${row['username'] ?? ''}',
+              role: '${row['profile_role'] ?? 'vendedor'}',
+              active: row['active'] == true,
+            ),
+          );
+    }
+
     final users = profileRows.map((row) {
       final id = '${row['id'] ?? ''}';
       final role = '${row['role'] ?? ''}';
+      final pharmacyCode = row['pharmacy_code']?.toString();
       return AdminUser(
         id: id,
         name: '${row['full_name'] ?? 'Sin nombre'}',
         username: '${row['username'] ?? ''}'.trim().isEmpty
             ? 'Perfil Auth · ${id.substring(0, id.length < 8 ? id.length : 8)}'
             : '${row['username']}',
+        phone: '${row['phone'] ?? ''}'.trim(),
         role: _adminRoleLabel(role),
-        pharmacy: row['pharmacy_code']?.toString() ?? 'Sin farmacia asignada',
+        pharmacy: pharmacyCode ?? 'Sin farmacia asignada',
         active: row['active'] == true,
+        pharmacyProfiles: pharmacyCode == null
+            ? const []
+            : pharmacyProfilesByCode[pharmacyCode] ?? const [],
       );
     }).toList();
     final profilesById = <String, Map<String, dynamic>>{
@@ -521,25 +2039,29 @@ class SupabaseOperationsService {
     };
 
     final shifts = shiftRows.map((row) {
-      final zoneId = '${row['zone_id'] ?? ''}';
+      final zoneIdValue = row['zone_id']?.toString();
       final courierId = '${row['courier_id'] ?? ''}';
-      final zone = zonesById[zoneId];
+      final zone = zoneIdValue == null ? null : zonesById[zoneIdValue];
       final profile = profilesById[courierId];
       final isDouble = row['is_double'] == true;
+      final isSupport = '${row['assignment_type'] ?? 'zone'}' == 'support';
       return AdminShift(
         id: '${row['id'] ?? ''}',
         // Nunca conviertas un UUID ausente en un texto vacío. Un valor vacío
         // puede terminar en el filtro de borrado y afectar cero filas sin
         // explicar al administrador qué ocurrió.
         courierId: courierId.trim().isEmpty ? null : courierId.trim(),
-        zoneId: zoneId,
+        zoneId: isSupport ? null : zoneIdValue,
         courierName: '${profile?['full_name'] ?? 'Domiciliario'}',
         hours:
             '${_adminTime(row['starts_at'])} – ${_adminTime(row['ends_at'])}',
-        zone: zone?.name ?? 'Zona sin nombre',
-        pharmacy: row['pharmacy_code']?.toString() ?? adminNoPharmacy,
+        zone: isSupport ? adminSupportZone : zone?.name ?? 'Zona sin nombre',
+        pharmacy: isSupport
+            ? adminNoPharmacy
+            : row['pharmacy_code']?.toString() ?? adminNoPharmacy,
         isDouble: isDouble,
         secondHours: isDouble ? adminDoubleHours : null,
+        isSupport: isSupport,
         scheduledFor: _adminDate(row['scheduled_for']),
         color: zone?.color ?? AppColors.primaryDark,
       );
@@ -617,7 +2139,7 @@ class SupabaseOperationsService {
         .from('shifts')
         .select(
           'id, courier_id, pharmacy_code, zone_id, scheduled_for, '
-          'starts_at, ends_at, is_double, status',
+          'starts_at, ends_at, is_double, status, assignment_type',
         )
         .eq('courier_id', courierId)
         .gte('scheduled_for', _adminDateIso(weekStart))
@@ -626,19 +2148,24 @@ class SupabaseOperationsService {
         .order('starts_at');
 
     return rows.map((row) {
-      final zone = zoneById['${row['zone_id'] ?? ''}'];
+      final zoneId = row['zone_id']?.toString();
+      final zone = zoneId == null ? null : zoneById[zoneId];
       final isDouble = row['is_double'] == true;
+      final isSupport = '${row['assignment_type'] ?? 'zone'}' == 'support';
       return AdminShift(
         id: '${row['id'] ?? ''}',
         courierId: '${row['courier_id'] ?? courierId}',
-        zoneId: '${row['zone_id'] ?? ''}',
+        zoneId: isSupport ? null : zoneId,
         courierName: courierName,
         hours:
             '${_adminTime(row['starts_at'])} – ${_adminTime(row['ends_at'])}',
-        zone: zone?.name ?? 'Zona sin nombre',
-        pharmacy: row['pharmacy_code']?.toString() ?? adminNoPharmacy,
+        zone: isSupport ? adminSupportZone : zone?.name ?? 'Zona sin nombre',
+        pharmacy: isSupport
+            ? adminNoPharmacy
+            : row['pharmacy_code']?.toString() ?? adminNoPharmacy,
         isDouble: isDouble,
         secondHours: isDouble ? adminDoubleHours : null,
+        isSupport: isSupport,
         scheduledFor: _adminDate(row['scheduled_for']),
         color: zone?.color ?? AppColors.primaryDark,
       );
@@ -705,7 +2232,7 @@ class SupabaseOperationsService {
     }
     final role = switch (user.role) {
       'Administrador' => 'admin',
-      'Vendedor de farmacia' => 'pharmacy',
+      'Vendedor de farmacia' || 'Cuenta de farmacia' => 'pharmacy',
       _ => 'courier',
     };
     final pharmacy = user.pharmacy == 'Sin farmacia asignada'
@@ -715,11 +2242,18 @@ class SupabaseOperationsService {
         .from('profiles')
         .update({
           'full_name': user.name,
+          'phone': user.phone.trim().isEmpty ? null : user.phone.trim(),
           'role': role,
           'pharmacy_code': pharmacy,
           'active': user.active,
         })
         .eq('id', user.id!);
+    if (role == 'pharmacy' && user.pharmacy != 'Sin farmacia asignada') {
+      await managePharmacyProfiles(
+        pharmacyCode: user.pharmacy,
+        profiles: user.pharmacyProfiles,
+      );
+    }
   }
 
   Future<AdminUser> createAdminUser({
@@ -731,7 +2265,7 @@ class SupabaseOperationsService {
     }
     final role = switch (user.role) {
       'Administrador' => 'admin',
-      'Vendedor de farmacia' => 'pharmacy',
+      'Vendedor de farmacia' || 'Cuenta de farmacia' => 'pharmacy',
       _ => 'courier',
     };
     final pharmacyCode = user.pharmacy == 'Sin farmacia asignada'
@@ -742,9 +2276,21 @@ class SupabaseOperationsService {
       body: {
         'username': user.username,
         'full_name': user.name,
+        'phone': user.phone.trim().isEmpty ? null : user.phone.trim(),
         'role': role,
         'pharmacy_code': pharmacyCode,
         'password': password,
+        'subprofiles': user.pharmacyProfiles
+            .map(
+              (profile) => {
+                'display_name': profile.displayName,
+                if (profile.username.trim().isNotEmpty)
+                  'username': profile.username,
+                'profile_role': 'vendedor',
+                'active': profile.active,
+              },
+            )
+            .toList(),
       },
     );
     final data = response.data is Map
@@ -756,14 +2302,64 @@ class SupabaseOperationsService {
     final created = data['user'] is Map
         ? Map<String, dynamic>.from(data['user'] as Map)
         : <String, dynamic>{};
+    final createdPharmacyCode = '${created['pharmacy_code'] ?? user.pharmacy}';
+    final createdPharmacyProfiles = (data['pharmacy_profiles'] is List
+        ? (data['pharmacy_profiles'] as List)
+              .whereType<Map>()
+              .map(
+                (row) => AdminPharmacyProfile.fromMap(
+                  Map<String, dynamic>.from(row),
+                ),
+              )
+              .toList()
+        : user.pharmacyProfiles);
     return AdminUser(
       id: '${created['id'] ?? ''}',
       name: '${created['full_name'] ?? user.name}',
       username: '${created['username'] ?? user.username}',
       role: user.role,
-      pharmacy: '${created['pharmacy_code'] ?? user.pharmacy}',
+      pharmacy: createdPharmacyCode,
       active: created['active'] == true,
+      temporaryPassword:
+          data['temporary_password']?.toString() ?? user.temporaryPassword,
+      pharmacyProfiles: createdPharmacyProfiles,
     );
+  }
+
+  Future<void> managePharmacyProfiles({
+    required String pharmacyCode,
+    required List<AdminPharmacyProfile> profiles,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) {
+      throw StateError('La sesión real de Supabase no está disponible.');
+    }
+    final response = await _client!.functions.invoke(
+      'admin-manage-pharmacy-profiles',
+      body: {
+        'pharmacy_code': pharmacyCode,
+        'profiles': profiles
+            .map(
+              (profile) => {
+                if (profile.id != null && profile.id!.isNotEmpty)
+                  'id': profile.id,
+                'display_name': profile.displayName,
+                if (profile.username.trim().isNotEmpty)
+                  'username': profile.username,
+                'profile_role': 'vendedor',
+                'active': profile.active,
+              },
+            )
+            .toList(),
+      },
+    );
+    final data = response.data is Map
+        ? Map<String, dynamic>.from(response.data as Map)
+        : <String, dynamic>{};
+    if (response.status < 200 || response.status >= 300) {
+      throw StateError(
+        '${data['error'] ?? 'No se pudieron guardar los perfiles de farmacia.'}',
+      );
+    }
   }
 
   Future<void> resetAdminUserPassword({
@@ -794,12 +2390,16 @@ class SupabaseOperationsService {
     if (!await initialize() || !hasAuthenticatedUser) {
       throw StateError('La sesión real de Supabase no está disponible.');
     }
-    final zoneRow = await _client!
-        .from('zones')
-        .select('id')
-        .eq('name', shift.zone)
-        .maybeSingle();
-    if (zoneRow == null) throw StateError('La zona seleccionada no existe.');
+    final zoneRow = shift.isSupport
+        ? null
+        : await _client!
+              .from('zones')
+              .select('id')
+              .eq('name', shift.zone)
+              .maybeSingle();
+    if (!shift.isSupport && zoneRow == null) {
+      throw StateError('La zona seleccionada no existe.');
+    }
 
     final profileRows = await _client!
         .from('profiles')
@@ -828,10 +2428,11 @@ class SupabaseOperationsService {
     }
     final payload = <String, dynamic>{
       'courier_id': courierRow['id'],
-      'pharmacy_code': shift.pharmacy == adminNoPharmacy
+      'pharmacy_code': shift.isSupport || shift.pharmacy == adminNoPharmacy
           ? null
           : shift.pharmacy,
-      'zone_id': zoneRow['id'],
+      'zone_id': shift.isSupport ? null : zoneRow!['id'],
+      'assignment_type': shift.isSupport ? 'support' : 'zone',
       'scheduled_for': _adminDateIso(shift.scheduledFor),
       'starts_at': times.first,
       'ends_at': times.last,
@@ -867,8 +2468,8 @@ class SupabaseOperationsService {
     final payloads = <Map<String, dynamic>>[];
 
     for (final shift in shifts) {
-      final zoneId = zonesByName[shift.zone];
-      if (zoneId == null) {
+      final zoneId = shift.isSupport ? null : zonesByName[shift.zone];
+      if (!shift.isSupport && zoneId == null) {
         throw StateError('La zona ${shift.zone} no existe en Supabase.');
       }
       Map<String, dynamic>? courierRow;
@@ -893,10 +2494,11 @@ class SupabaseOperationsService {
       }
       payloads.add({
         'courier_id': courierRow['id'],
-        'pharmacy_code': shift.pharmacy == adminNoPharmacy
+        'pharmacy_code': shift.isSupport || shift.pharmacy == adminNoPharmacy
             ? null
             : shift.pharmacy,
         'zone_id': zoneId,
+        'assignment_type': shift.isSupport ? 'support' : 'zone',
         'scheduled_for': _adminDateIso(shift.scheduledFor),
         'starts_at': times.first,
         'ends_at': times.last,
@@ -953,6 +2555,120 @@ class SupabaseOperationsService {
     return deleted.length;
   }
 
+  Future<CourierFeeSummary?> loadCourierFeeSummary({
+    required DateTime weekStart,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) return null;
+    final rows = await _client!.rpc(
+      'get_courier_fee_summary',
+      params: {'requested_week_start': _adminDateIso(weekStart)},
+    );
+    if (rows is List && rows.isNotEmpty) {
+      return CourierFeeSummary.fromMap(
+        Map<String, dynamic>.from(rows.first as Map),
+      );
+    }
+    if (rows is Map) {
+      return CourierFeeSummary.fromMap(Map<String, dynamic>.from(rows));
+    }
+    return null;
+  }
+
+  Future<List<AdminCourierFeeSummary>> loadAdminCourierFeeSummary({
+    required DateTime weekStart,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) return const [];
+    final rows = await _client!.rpc(
+      'get_admin_courier_fee_summary',
+      params: {'requested_week_start': _adminDateIso(weekStart)},
+    );
+    if (rows is! List) return const [];
+    return rows
+        .whereType<Map>()
+        .map(
+          (row) =>
+              AdminCourierFeeSummary.fromMap(Map<String, dynamic>.from(row)),
+        )
+        .toList();
+  }
+
+  Future<void> recordCourierFeePayment({
+    required String courierId,
+    required DateTime weekStart,
+    required double amount,
+    required String paymentMethod,
+    String? note,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) {
+      throw StateError('La sesión real de Supabase no está disponible.');
+    }
+    await _client!.rpc(
+      'record_courier_fee_payment',
+      params: {
+        'requested_courier_id': courierId,
+        'requested_week_start': _adminDateIso(weekStart),
+        'requested_amount': amount,
+        'requested_payment_method': paymentMethod,
+        'requested_note': note?.trim().isEmpty == true ? null : note?.trim(),
+      },
+    );
+  }
+
+  Future<List<CourierPharmacyBreakdown>> loadCourierPharmacyBreakdown() async {
+    if (!await initialize() || !hasAuthenticatedUser) {
+      throw StateError(
+        'No hay una sesión autenticada de Supabase para consultar el desglose.',
+      );
+    }
+    final rows = await _client!.rpc('get_courier_pharmacy_breakdown');
+    if (rows is! List) {
+      throw const FormatException(
+        'Supabase devolvió un desglose de domicilios no válido.',
+      );
+    }
+    return rows
+        .whereType<Map>()
+        .map(
+          (row) =>
+              CourierPharmacyBreakdown.fromMap(Map<String, dynamic>.from(row)),
+        )
+        .toList();
+  }
+
+  Future<List<PharmacyCourierBreakdown>> loadPharmacyCourierBreakdown({
+    required String pharmacyCode,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) return const [];
+    final rows = await _client!.rpc(
+      'get_pharmacy_courier_breakdown',
+      params: {'requested_pharmacy_code': pharmacyCode},
+    );
+    if (rows is! List) return const [];
+    return rows
+        .whereType<Map>()
+        .map(
+          (row) =>
+              PharmacyCourierBreakdown.fromMap(Map<String, dynamic>.from(row)),
+        )
+        .toList();
+  }
+
+  Future<void> updateCourierFeeSettings({
+    required double dailyAmount,
+    required double doubleShiftSurcharge,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) {
+      throw StateError('La sesión real de Supabase no está disponible.');
+    }
+    await _client!.rpc(
+      'update_courier_fee_settings',
+      params: {
+        'requested_daily_amount': dailyAmount,
+        'requested_double_shift_surcharge': doubleShiftSurcharge,
+      },
+    );
+  }
+
   double? _adminDouble(dynamic value) =>
       value is num ? value.toDouble() : double.tryParse('${value ?? ''}');
 
@@ -971,13 +2687,63 @@ class SupabaseOperationsService {
 
   String _adminRoleLabel(String role) => switch (role) {
     'admin' => 'Administrador',
-    'pharmacy' => 'Vendedor de farmacia',
+    'pharmacy' => 'Cuenta de farmacia',
     _ => 'Domiciliario',
   };
 
   Future<void> signOut() async {
     if (!await initialize()) return;
     await _client!.auth.signOut();
+  }
+
+  Future<void> upsertPushToken({
+    required String token,
+    required String platform,
+    String? alertSound,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) return;
+    final cleanToken = token.trim();
+    if (cleanToken.isEmpty) return;
+    final normalizedPlatform = switch (platform) {
+      'ios' => 'ios',
+      'web' => 'web',
+      _ => 'android',
+    };
+    // La función `register_push_token` (migración 038) reasigna el token si
+    // el teléfono pasó de un usuario a otro, algo que RLS no permite con un
+    // upsert directo. Mientras la migración no esté aplicada se usa el upsert.
+    try {
+      await _client!.rpc(
+        'register_push_token',
+        params: {
+          'p_token': cleanToken,
+          'p_platform': normalizedPlatform,
+          'p_alert_sound': alertSound,
+        },
+      );
+      return;
+    } on PostgrestException catch (error) {
+      final missingFunction = error.code == 'PGRST202' || error.code == '42883';
+      if (!missingFunction) rethrow;
+    }
+    await _client!.from('push_tokens').upsert({
+      'user_id': _client!.auth.currentUser!.id,
+      'token': cleanToken,
+      'platform': normalizedPlatform,
+      'active': true,
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+    }, onConflict: 'token');
+  }
+
+  Future<void> removePushToken(String token) async {
+    if (!await initialize() || !hasAuthenticatedUser) return;
+    final cleanToken = token.trim();
+    if (cleanToken.isEmpty) return;
+    await _client!
+        .from('push_tokens')
+        .delete()
+        .eq('user_id', _client!.auth.currentUser!.id)
+        .eq('token', cleanToken);
   }
 
   Future<bool> initialize() {
@@ -1064,6 +2830,8 @@ class SupabaseOperationsService {
             'addressReference': row['address_reference'],
             'approvalPending': row['approval_pending'],
             'approvalCourierName': row['approval_courier_name'],
+            'acceptedCourierId': row['accepted_courier_id'],
+            'assignedAsSupport': row['assigned_as_support'],
             'deliveryOutcome': row['delivery_outcome'],
           };
           return RealtimeOperationsService.instance._deliveryFromMap(
@@ -1077,66 +2845,205 @@ class SupabaseOperationsService {
     }
   }
 
+  Future<Stream<List<DeliveryChatMessage>>?> watchDeliveryChat({
+    required String deliveryId,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) return null;
+    try {
+      final stream = _client!
+          .from('delivery_chat_messages')
+          .stream(primaryKey: ['id'])
+          .eq('delivery_id', deliveryId)
+          .order('created_at');
+      return stream.map(
+        (rows) => rows
+            .map(
+              (row) =>
+                  DeliveryChatMessage.fromMap(Map<String, dynamic>.from(row)),
+            )
+            .toList(),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<DeliveryChatMessage> sendDeliveryChat({
+    required String deliveryId,
+    required String body,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) {
+      throw StateError('La sesión real de Supabase no está disponible.');
+    }
+    final cleanBody = body.trim();
+    if (cleanBody.isEmpty) {
+      throw ArgumentError('El mensaje no puede estar vacío.');
+    }
+    final row = await _client!
+        .from('delivery_chat_messages')
+        .insert({
+          'delivery_id': deliveryId,
+          'sender_id': _client!.auth.currentUser!.id,
+          'body': cleanBody,
+        })
+        .select('*')
+        .single();
+    final message = DeliveryChatMessage.fromMap(Map<String, dynamic>.from(row));
+    // El tiempo real cubre la sesión abierta; la función Edge cubre la web
+    // en segundo plano y los dispositivos que tienen push registrado. Un
+    // fallo del proveedor de notificaciones nunca debe hacer fallar el chat.
+    unawaited(() async {
+      try {
+        await _client!.functions.invoke(
+          'send-push-notification',
+          body: {
+            'event': 'chat_message',
+            'delivery_id': deliveryId,
+            'message_id': message.id,
+          },
+        );
+      } catch (_) {
+        // La notificación es complementaria; el mensaje ya quedó guardado.
+      }
+    }());
+    return message;
+  }
+
+  Future<DeliveryEquivalent?> loadDeliveryEquivalent({
+    required String deliveryId,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) {
+      throw StateError('La sesión real de Supabase no está disponible.');
+    }
+    var row = await _client!
+        .from('delivery_equivalents')
+        .select('*')
+        .eq('delivery_id', deliveryId)
+        .maybeSingle();
+    if (row == null) {
+      await _client!.rpc(
+        'ensure_delivery_equivalent',
+        params: {'requested_delivery_id': deliveryId},
+      );
+      row = await _client!
+          .from('delivery_equivalents')
+          .select('*')
+          .eq('delivery_id', deliveryId)
+          .maybeSingle();
+    }
+    if (row == null) return null;
+    return DeliveryEquivalent.fromMap(Map<String, dynamic>.from(row));
+  }
+
+  Future<Map<String, String>> loadCourierEquivalentStatuses() async {
+    if (!await initialize() || !hasAuthenticatedUser) return const {};
+    final courierId = currentUserId;
+    if (courierId == null || courierId.isEmpty) return const {};
+    final rows = await _client!
+        .from('delivery_equivalents')
+        .select('delivery_id, status')
+        .eq('courier_id', courierId);
+    return <String, String>{
+      for (final row in rows)
+        '${row['delivery_id'] ?? ''}': '${row['status'] ?? 'draft'}',
+    }..removeWhere((key, value) => key.isEmpty);
+  }
+
+  Future<String> loadEquivalentPaymentTiming() async {
+    if (!await initialize() || !hasAuthenticatedUser) {
+      return 'end_of_shift';
+    }
+    final value = await _client!.rpc('get_equivalent_payment_timing');
+    final timing = '$value'.trim();
+    return timing == 'immediate' ? 'immediate' : 'end_of_shift';
+  }
+
+  Future<void> updateEquivalentPaymentTiming({required String timing}) async {
+    if (!await initialize() || !hasAuthenticatedUser) {
+      throw StateError('La sesión real de Supabase no está disponible.');
+    }
+    await _client!.rpc(
+      'update_equivalent_payment_timing',
+      params: {'requested_timing': timing},
+    );
+  }
+
+  Future<void> signDeliveryEquivalent({
+    required String equivalentId,
+    required String signatureName,
+    required String signatureImage,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) {
+      throw StateError('La sesión real de Supabase no está disponible.');
+    }
+    await _client!.rpc(
+      'sign_delivery_equivalent_with_image',
+      params: {
+        'requested_equivalent_id': equivalentId,
+        'requested_signature_name': signatureName.trim(),
+        'requested_signature_image': signatureImage,
+      },
+    );
+  }
+
   Future<void> updateDeliveryStatus({
     required String deliveryId,
     required DeliveryStatus status,
   }) async {
-    if (!await initialize() || !hasAuthenticatedUser) return;
-    try {
-      final now = DateTime.now().toUtc().toIso8601String();
-      await _client!
-          .from('deliveries')
-          .update({
-            'status': status.name,
-            'updated_at': now,
-            if (status == DeliveryStatus.pickedUp) 'picked_up_at': now,
-            if (status == DeliveryStatus.delivered ||
-                status == DeliveryStatus.notDelivered)
-              'delivered_at': now,
-          })
-          .eq('id', deliveryId);
-
-      await _client!.from('delivery_events').insert({
-        'delivery_id': deliveryId,
-        'actor_id': _client!.auth.currentUser!.id,
-        'event_type': 'status_changed',
-        'to_status': status.name,
-        'metadata': {'source': 'courier_app'},
-      });
-    } catch (_) {
-      // El flujo local sigue funcionando si el servidor está temporalmente
-      // fuera de línea; el próximo ciclo de sincronización podrá reintentar.
+    if (!await initialize() || !hasAuthenticatedUser) {
+      throw StateError(
+        'No hay una sesión activa de Supabase para guardar el domicilio.',
+      );
     }
+    await _client!.rpc(
+      'transition_delivery_status',
+      params: {
+        'requested_delivery_id': deliveryId,
+        'requested_status': status.name,
+      },
+    );
   }
 
-  Future<bool> acceptDelivery({required String deliveryId}) async {
+  Future<bool> requestDeliveryApproval({required String deliveryId}) async {
     if (!await initialize() || !hasAuthenticatedUser) return false;
-    try {
-      final now = DateTime.now().toUtc().toIso8601String();
-      final rows = await _client!
-          .from('deliveries')
-          .update({
-            'status': DeliveryStatus.accepted.name,
-            'accepted_courier_id': _client!.auth.currentUser!.id,
-            'accepted_at': now,
-            'updated_at': now,
-          })
-          .eq('id', deliveryId)
-          .eq('status', DeliveryStatus.offered.name)
-          .isFilter('accepted_courier_id', null)
-          .select('id');
-      if (rows.isEmpty) return false;
-      await _client!.from('delivery_events').insert({
-        'delivery_id': deliveryId,
-        'actor_id': _client!.auth.currentUser!.id,
-        'event_type': 'status_changed',
-        'to_status': DeliveryStatus.accepted.name,
-        'metadata': {'source': 'courier_app_autoaccept'},
-      });
-      return true;
-    } catch (_) {
-      return false;
-    }
+    final result = await _client!.rpc(
+      'request_delivery_approval',
+      params: {'requested_delivery_id': deliveryId},
+    );
+    return result == true || '$result'.toLowerCase() == 'true';
+  }
+
+  Future<bool> approveDeliveryRequest({required String deliveryId}) async {
+    if (!await initialize() || !hasAuthenticatedUser) return false;
+    final result = await _client!.rpc(
+      'approve_delivery_request',
+      params: {'requested_delivery_id': deliveryId},
+    );
+    return result == true || '$result'.toLowerCase() == 'true';
+  }
+
+  Future<bool> rejectDeliveryRequest({required String deliveryId}) async {
+    if (!await initialize() || !hasAuthenticatedUser) return false;
+    final result = await _client!.rpc(
+      'reject_delivery_request',
+      params: {'requested_delivery_id': deliveryId},
+    );
+    return result == true || '$result'.toLowerCase() == 'true';
+  }
+
+  Future<bool> acceptDelivery({
+    required String deliveryId,
+    bool asSupport = false,
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) return false;
+    final result = await _client!.rpc(
+      'accept_delivery',
+      params: {
+        'requested_delivery_id': deliveryId,
+        'requested_as_support': asSupport,
+      },
+    );
+    return result == true || '$result'.toLowerCase() == 'true';
   }
 
   Future<void> publishCourierConnection({
@@ -1205,6 +3112,11 @@ class OperationsBackend {
   Future<SupabaseUserProfile?> loadCurrentProfile() =>
       SupabaseOperationsService.instance.loadCurrentProfile();
 
+  Future<void> completePasswordChange({required String password}) =>
+      SupabaseOperationsService.instance.completePasswordChange(
+        password: password,
+      );
+
   Future<void> resetAdminUserPassword({
     required String userId,
     required String password,
@@ -1214,9 +3126,16 @@ class OperationsBackend {
   );
 
   Future<void> signOut() async {
+    await BackgroundNotificationService.unregisterCurrentDevice();
     if (!SupabaseConfig.isConfigured) return;
     await SupabaseOperationsService.instance.signOut();
   }
+
+  Future<void> registerPushNotifications() =>
+      BackgroundNotificationService.registerForCurrentUser();
+
+  Future<bool> requestNotificationPermission() =>
+      BackgroundNotificationService.requestPermissionForEntry();
 
   Future<void> publishCourierLocation({
     required String courierId,
@@ -1257,10 +3176,81 @@ class OperationsBackend {
           status: status,
         );
 
+  Future<bool> requestDeliveryApproval({required String deliveryId}) =>
+      SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.requestDeliveryApproval(
+          deliveryId: deliveryId,
+        )
+      : Future.value(false);
+
+  Future<bool> approveDeliveryRequest({required String deliveryId}) =>
+      SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.approveDeliveryRequest(
+          deliveryId: deliveryId,
+        )
+      : Future.value(false);
+
+  Future<bool> rejectDeliveryRequest({required String deliveryId}) =>
+      SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.rejectDeliveryRequest(
+          deliveryId: deliveryId,
+        )
+      : Future.value(false);
+
   Future<Stream<List<Delivery>>?> watchDeliveries() =>
       SupabaseConfig.isConfigured
       ? SupabaseOperationsService.instance.watchDeliveries()
       : RealtimeOperationsService.instance.watchDeliveries();
+
+  Future<Stream<List<DeliveryChatMessage>>?> watchDeliveryChat({
+    required String deliveryId,
+  }) => SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.watchDeliveryChat(
+          deliveryId: deliveryId,
+        )
+      : Future.value(null);
+
+  Future<DeliveryChatMessage> sendDeliveryChat({
+    required String deliveryId,
+    required String body,
+  }) => SupabaseOperationsService.instance.sendDeliveryChat(
+    deliveryId: deliveryId,
+    body: body,
+  );
+
+  Future<DeliveryEquivalent?> loadDeliveryEquivalent({
+    required String deliveryId,
+  }) => SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.loadDeliveryEquivalent(
+          deliveryId: deliveryId,
+        )
+      : Future.value(null);
+
+  Future<void> signDeliveryEquivalent({
+    required String equivalentId,
+    required String signatureName,
+    required String signatureImage,
+  }) => SupabaseOperationsService.instance.signDeliveryEquivalent(
+    equivalentId: equivalentId,
+    signatureName: signatureName,
+    signatureImage: signatureImage,
+  );
+
+  Future<Map<String, String>> loadCourierEquivalentStatuses() =>
+      SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.loadCourierEquivalentStatuses()
+      : Future.value(const <String, String>{});
+
+  Future<String> loadEquivalentPaymentTiming() => SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.loadEquivalentPaymentTiming()
+      : Future.value('end_of_shift');
+
+  Future<void> updateEquivalentPaymentTiming({required String timing}) =>
+      SupabaseOperationsService.instance.updateEquivalentPaymentTiming(
+        timing: timing,
+      );
+
+  String? get currentUserId => SupabaseOperationsService.instance.currentUserId;
 
   Future<List<AdminShift>> loadCourierShifts({
     required String courierId,
@@ -1285,15 +3275,80 @@ class OperationsBackend {
               .toList(),
         );
 
-  Future<bool> acceptDelivery({required String deliveryId}) =>
+  Future<CourierFeeSummary?> loadCourierFeeSummary({
+    required DateTime weekStart,
+  }) => SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.loadCourierFeeSummary(
+          weekStart: weekStart,
+        )
+      : Future.value(null);
+
+  Future<List<AdminCourierFeeSummary>> loadAdminCourierFeeSummary({
+    required DateTime weekStart,
+  }) => SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.loadAdminCourierFeeSummary(
+          weekStart: weekStart,
+        )
+      : Future.value(const []);
+
+  Future<void> recordCourierFeePayment({
+    required String courierId,
+    required DateTime weekStart,
+    required double amount,
+    required String paymentMethod,
+    String? note,
+  }) => SupabaseOperationsService.instance.recordCourierFeePayment(
+    courierId: courierId,
+    weekStart: weekStart,
+    amount: amount,
+    paymentMethod: paymentMethod,
+    note: note,
+  );
+
+  Future<List<CourierPharmacyBreakdown>> loadCourierPharmacyBreakdown() =>
       SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.loadCourierPharmacyBreakdown()
+      : Future.error(
+          StateError(
+            'Supabase no está configurado en esta versión de la aplicación.',
+          ),
+        );
+
+  Future<List<PharmacyCourierBreakdown>> loadPharmacyCourierBreakdown({
+    required String pharmacyCode,
+  }) => SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.loadPharmacyCourierBreakdown(
+          pharmacyCode: pharmacyCode,
+        )
+      : Future.value(const []);
+
+  Future<void> updateCourierFeeSettings({
+    required double dailyAmount,
+    required double doubleShiftSurcharge,
+  }) => SupabaseOperationsService.instance.updateCourierFeeSettings(
+    dailyAmount: dailyAmount,
+    doubleShiftSurcharge: doubleShiftSurcharge,
+  );
+
+  Future<bool> acceptDelivery({
+    required String deliveryId,
+    bool asSupport = false,
+  }) => SupabaseConfig.isConfigured
       ? SupabaseOperationsService.instance.acceptDelivery(
           deliveryId: deliveryId,
+          asSupport: asSupport,
         )
       : Future.value(false);
 }
 
-enum DeliveryKind { pharmacyToHome, storeToStore, overflow }
+enum DeliveryKind {
+  pharmacyToHome,
+  storeToStore,
+  externalPurchase,
+  pharmacyCross,
+  combinedService,
+  overflow,
+}
 
 enum PaymentMethod { cash, card, qr }
 
@@ -1303,18 +3358,27 @@ extension DeliveryKindX on DeliveryKind {
   String get label => switch (this) {
     DeliveryKind.pharmacyToHome => 'Domicilio',
     DeliveryKind.storeToStore => 'Traslado',
+    DeliveryKind.externalPurchase => 'Compra externa',
+    DeliveryKind.pharmacyCross => 'Cruce',
+    DeliveryKind.combinedService => 'Servicio combinado',
     DeliveryKind.overflow => 'Desborde',
   };
 
   IconData get icon => switch (this) {
     DeliveryKind.pharmacyToHome => Icons.shopping_bag_outlined,
     DeliveryKind.storeToStore => Icons.swap_horiz_rounded,
+    DeliveryKind.externalPurchase => Icons.shopping_cart_outlined,
+    DeliveryKind.pharmacyCross => Icons.swap_horiz_rounded,
+    DeliveryKind.combinedService => Icons.route_rounded,
     DeliveryKind.overflow => Icons.bolt_rounded,
   };
 
   Color get color => switch (this) {
     DeliveryKind.pharmacyToHome => AppColors.primary,
     DeliveryKind.storeToStore => AppColors.blue,
+    DeliveryKind.externalPurchase => AppColors.violet,
+    DeliveryKind.pharmacyCross => AppColors.blue,
+    DeliveryKind.combinedService => AppColors.primaryDark,
     DeliveryKind.overflow => AppColors.warning,
   };
 }
@@ -1373,6 +3437,20 @@ class DeliveryPickupStop {
   final String address;
   final LatLng point;
   final String label;
+}
+
+class DeliveryCrossRoute {
+  const DeliveryCrossRoute({
+    required this.originCode,
+    required this.destinationCode,
+  });
+
+  final String originCode;
+  final String destinationCode;
+
+  String get label =>
+      '${formatPharmacyCodeLabel(originCode)} → '
+      '${formatPharmacyCodeLabel(destinationCode)}';
 }
 
 class DeliveryServicePlan {
@@ -1465,7 +3543,7 @@ class DeliveryServicePlan {
   }
 
   String get ruleNote =>
-      'Tarifa oficial FarmaNorte · $label · ${_money(fee.toDouble())}';
+      'Tarifa oficial farmanorte · $label · ${_money(fee.toDouble())}';
 
   factory DeliveryServicePlan.fromMap(
     Map<dynamic, dynamic> data, {
@@ -1483,7 +3561,13 @@ class DeliveryServicePlan {
 
     final bool hasDomicilio = data['hasDomicilio'] is bool
         ? data['hasDomicilio'] as bool
-        : kind != DeliveryKind.storeToStore || rawType.contains('domicilio');
+        : rawType.isEmpty
+        ? switch (kind) {
+            DeliveryKind.externalPurchase ||
+            DeliveryKind.pharmacyCross => false,
+            _ => true,
+          }
+        : rawType.contains('domicilio');
     final parsedCrossCount = data['crossCount'] is num
         ? (data['crossCount'] as num).round()
         : int.tryParse((data['crossCount'] ?? 0).toString()) ?? 0;
@@ -1542,6 +3626,7 @@ class Delivery {
     this.service = const DeliveryServicePlan(),
     this.productSummary = 'Productos del pedido',
     this.pickupStops = const [],
+    this.crossRoutes = const [],
     this.destinationOptions = const [],
     this.selectedAddressIndex = 0,
     this.pharmacyCode = '',
@@ -1550,6 +3635,8 @@ class Delivery {
     this.cashExpected,
     this.approvalPending = false,
     this.approvalCourierName,
+    this.assignedAsSupport = false,
+    this.acceptedCourierId,
     this.deliveryOutcome,
   });
 
@@ -1575,6 +3662,7 @@ class Delivery {
   final DeliveryServicePlan service;
   final String productSummary;
   final List<DeliveryPickupStop> pickupStops;
+  final List<DeliveryCrossRoute> crossRoutes;
   final List<DeliveryAddress> destinationOptions;
   final int selectedAddressIndex;
   final String pharmacyCode;
@@ -1583,6 +3671,8 @@ class Delivery {
   final double? cashExpected;
   final bool approvalPending;
   final String? approvalCourierName;
+  final bool assignedAsSupport;
+  final String? acceptedCourierId;
   final String? deliveryOutcome;
 
   double get serviceFee =>
@@ -1612,6 +3702,8 @@ class Delivery {
     double? cashReceived,
     bool? approvalPending,
     String? approvalCourierName,
+    bool? assignedAsSupport,
+    String? acceptedCourierId,
     String? deliveryOutcome,
   }) => Delivery(
     id: id,
@@ -1636,6 +3728,7 @@ class Delivery {
     service: service,
     productSummary: productSummary,
     pickupStops: pickupStops,
+    crossRoutes: crossRoutes,
     destinationOptions: destinationOptions,
     selectedAddressIndex: selectedAddressIndex ?? this.selectedAddressIndex,
     pharmacyCode: pharmacyCode,
@@ -1644,6 +3737,8 @@ class Delivery {
     cashExpected: cashExpected,
     approvalPending: approvalPending ?? this.approvalPending,
     approvalCourierName: approvalCourierName ?? this.approvalCourierName,
+    assignedAsSupport: assignedAsSupport ?? this.assignedAsSupport,
+    acceptedCourierId: acceptedCourierId ?? this.acceptedCourierId,
     deliveryOutcome: deliveryOutcome ?? this.deliveryOutcome,
   );
 }
@@ -1762,6 +3857,31 @@ class AdminZone {
   );
 }
 
+class AdminPharmacyProfile {
+  const AdminPharmacyProfile({
+    this.id,
+    required this.displayName,
+    required this.username,
+    required this.role,
+    required this.active,
+  });
+
+  final String? id;
+  final String displayName;
+  final String username;
+  final String role;
+  final bool active;
+
+  factory AdminPharmacyProfile.fromMap(Map<String, dynamic> row) =>
+      AdminPharmacyProfile(
+        id: row['id']?.toString(),
+        displayName: '${row['display_name'] ?? ''}',
+        username: '${row['username'] ?? ''}',
+        role: '${row['profile_role'] ?? 'vendedor'}',
+        active: row['active'] == true,
+      );
+}
+
 class AdminUser {
   const AdminUser({
     this.id,
@@ -1770,7 +3890,9 @@ class AdminUser {
     required this.role,
     required this.pharmacy,
     required this.active,
+    this.phone = '',
     this.temporaryPassword,
+    this.pharmacyProfiles = const [],
   });
 
   final String? id;
@@ -1779,7 +3901,9 @@ class AdminUser {
   final String role;
   final String pharmacy;
   final bool active;
+  final String phone;
   final String? temporaryPassword;
+  final List<AdminPharmacyProfile> pharmacyProfiles;
 
   AdminUser copyWith({
     String? id,
@@ -1788,7 +3912,9 @@ class AdminUser {
     String? role,
     String? pharmacy,
     bool? active,
+    String? phone,
     String? temporaryPassword,
+    List<AdminPharmacyProfile>? pharmacyProfiles,
   }) => AdminUser(
     id: id ?? this.id,
     name: name ?? this.name,
@@ -1796,7 +3922,9 @@ class AdminUser {
     role: role ?? this.role,
     pharmacy: pharmacy ?? this.pharmacy,
     active: active ?? this.active,
+    phone: phone ?? this.phone,
     temporaryPassword: temporaryPassword ?? this.temporaryPassword,
+    pharmacyProfiles: pharmacyProfiles ?? this.pharmacyProfiles,
   );
 }
 
@@ -1808,12 +3936,14 @@ class AdminWeeklyDayDraft {
     required this.zone,
     required this.pharmacy,
     this.isDouble = false,
+    this.isSupport = false,
   });
 
   String hours;
   String zone;
   String pharmacy;
   bool isDouble;
+  bool isSupport;
 }
 
 class AdminWeeklyShiftDraft {
@@ -1870,6 +4000,7 @@ class AdminShift {
     required this.scheduledFor,
     required this.color,
     this.secondHours,
+    this.isSupport = false,
   });
 
   final String? id;
@@ -1883,6 +4014,7 @@ class AdminShift {
   final DateTime scheduledFor;
   final String? secondHours;
   final Color color;
+  final bool isSupport;
 
   String get name => courierName;
 
@@ -1891,8 +4023,11 @@ class AdminShift {
 
   String get pharmacyLabel => adminShiftPharmacyLabel(pharmacy);
 
-  String get assignmentLabel =>
-      pharmacy == adminNoPharmacy ? 'Toda la zona' : 'Farmacia $pharmacy';
+  String get assignmentLabel => isSupport
+      ? 'Apoyo general'
+      : pharmacy == adminNoPharmacy
+      ? 'Toda la zona'
+      : 'Farmacia $pharmacy';
 
   int get blockCount => isDouble ? 2 : 1;
 
@@ -1922,6 +4057,7 @@ class AdminShift {
     DateTime? scheduledFor,
     String? secondHours,
     Color? color,
+    bool? isSupport,
   }) => AdminShift(
     id: id ?? this.id,
     courierId: courierId ?? this.courierId,
@@ -1934,6 +4070,7 @@ class AdminShift {
     scheduledFor: scheduledFor ?? this.scheduledFor,
     secondHours: secondHours ?? this.secondHours,
     color: color ?? this.color,
+    isSupport: isSupport ?? this.isSupport,
   );
 }
 
@@ -1949,6 +4086,7 @@ const adminPrimaryHours = <String>['07:00 – 15:00', '14:00 – 23:00'];
 const adminDoubleHours = '17:00 – 23:00';
 
 const adminNoPharmacy = 'Sin farmacia asignada';
+const adminSupportZone = 'Apoyo general';
 
 const adminFlexibleZones = <String>{
   'Zona 41',
@@ -2399,7 +4537,7 @@ final demoAdminUsers = <AdminUser>[
 
 final demoDeliveries = <Delivery>[
   Delivery(
-    id: 'FN-155-001',
+    id: 'FN155001',
     storeName: 'FN 155',
     storeAddress: 'Monteverde · dirección por confirmar',
     destination: 'La Castellana',
@@ -2445,7 +4583,7 @@ final demoDeliveries = <Delivery>[
     ],
   ),
   Delivery(
-    id: 'FN-183-002',
+    id: 'FN183002',
     storeName: 'FN 183',
     storeAddress: 'Zona norte · dirección por confirmar',
     destination: 'El Recreo',
@@ -2484,7 +4622,7 @@ final demoDeliveries = <Delivery>[
     ],
   ),
   Delivery(
-    id: 'FN-232-003',
+    id: 'FN232003',
     storeName: 'FN 232',
     storeAddress: 'Curva del Diablo · dirección por confirmar',
     destination: 'Villa Campestre',
@@ -2506,7 +4644,7 @@ final demoDeliveries = <Delivery>[
     neighborhood: 'Villa Campestre',
     addressReference: 'Cruce en FN 183 · entregar directo al cliente',
     service: DeliveryServicePlan(crossCount: 1, hasDataphone: true),
-    productSummary: 'Un producto debe recogerse en otra FarmaNorte',
+    productSummary: 'Un producto debe recogerse en otra farmanorte',
     pickupStops: [
       DeliveryPickupStop(
         title: 'FN 232',
@@ -2523,7 +4661,7 @@ final demoDeliveries = <Delivery>[
     ],
   ),
   Delivery(
-    id: 'FN-219-004',
+    id: 'FN219004',
     storeName: 'FN 219',
     storeAddress: 'Margen izquierda · dirección por confirmar',
     destination: 'Alamedas del Sinú',
@@ -2562,7 +4700,7 @@ final demoDeliveries = <Delivery>[
     ],
   ),
   Delivery(
-    id: 'FN-177-005',
+    id: 'FN177005',
     storeName: 'FN 177',
     storeAddress: 'Calle 23 # 7-19, Centro',
     destination: 'Punto de cambio',
@@ -2594,7 +4732,11 @@ final demoDeliveries = <Delivery>[
 ];
 
 class FarmaNorteApp extends StatelessWidget {
-  const FarmaNorteApp({super.key});
+  const FarmaNorteApp({super.key, this.allowLocalReview = false});
+
+  /// Solo se activa desde las pruebas automatizadas. Las compilaciones
+  /// instalables nunca deben entrar al modo local ni mostrar datos ficticios.
+  final bool allowLocalReview;
 
   @override
   Widget build(BuildContext context) {
@@ -2604,7 +4746,7 @@ class FarmaNorteApp extends StatelessWidget {
     );
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'FarmaNorte Domicilios',
+      title: 'farmanorte Domicilios',
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: scheme.copyWith(
@@ -2615,6 +4757,10 @@ class FarmaNorteApp extends StatelessWidget {
         ),
         scaffoldBackgroundColor: AppColors.canvas,
         fontFamily: 'Roboto',
+        iconTheme: const IconThemeData(color: AppColors.primaryDark, size: 21),
+        listTileTheme: const ListTileThemeData(
+          iconColor: AppColors.primaryDark,
+        ),
         appBarTheme: const AppBarTheme(
           backgroundColor: Colors.transparent,
           foregroundColor: AppColors.ink,
@@ -2664,13 +4810,17 @@ class FarmaNorteApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const SessionGate(),
+      builder: (context, child) =>
+          NotificationPermissionBanner(child: child ?? const SizedBox.shrink()),
+      home: SessionGate(allowLocalReview: allowLocalReview),
     );
   }
 }
 
 class SessionGate extends StatefulWidget {
-  const SessionGate({super.key});
+  const SessionGate({super.key, this.allowLocalReview = false});
+
+  final bool allowLocalReview;
 
   @override
   State<SessionGate> createState() => _SessionGateState();
@@ -2712,11 +4862,27 @@ class _SessionGateState extends State<SessionGate> {
         });
         return;
       }
+      // La sesión puede haber sido guardada por otra superficie del sistema.
+      // Nunca conviertas automáticamente cualquier rol distinto de admin en
+      // domiciliario: una cuenta de farmacia solo puede usar su página web.
+      if (!isSupportedOperationsAppRole(profile.role)) {
+        await service.signOut();
+        if (!mounted) return;
+        setState(() {
+          _loading = false;
+          _error = operationsAppAccessMessage(profile.role);
+        });
+        return;
+      }
+      // Solicitar el permiso antes de mostrar la jornada operativa. Si el
+      // sistema tarda o Firebase no está disponible, la sesión no se bloquea.
+      await OperationsBackend.instance.requestNotificationPermission();
       if (!mounted) return;
       setState(() {
         _profile = profile;
         _loading = false;
       });
+      unawaited(OperationsBackend.instance.registerPushNotifications());
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -2733,7 +4899,18 @@ class _SessionGateState extends State<SessionGate> {
     if (_loading) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
+    if (!SupabaseConfig.isConfigured && !widget.allowLocalReview) {
+      return const BackendConfigurationRequiredScreen();
+    }
     if (_profile != null) {
+      if (_profile!.mustChangePassword) {
+        return PasswordChangeRequiredScreen(
+          profile: _profile!,
+          nextScreenBuilder: (updatedProfile) => updatedProfile.role == 'admin'
+              ? AdminDashboardScreen(realBackend: true, profile: updatedProfile)
+              : HomeScreen(profile: updatedProfile),
+        );
+      }
       return _profile!.role == 'admin'
           ? AdminDashboardScreen(realBackend: true, profile: _profile)
           : HomeScreen(profile: _profile);
@@ -2782,12 +4959,218 @@ class _SessionGateState extends State<SessionGate> {
         ),
       );
     }
-    return const LoginScreen();
+    return LoginScreen(allowLocalReview: widget.allowLocalReview);
+  }
+}
+
+class PasswordChangeRequiredScreen extends StatefulWidget {
+  const PasswordChangeRequiredScreen({
+    super.key,
+    required this.profile,
+    required this.nextScreenBuilder,
+  });
+
+  final SupabaseUserProfile profile;
+  final Widget Function(SupabaseUserProfile profile) nextScreenBuilder;
+
+  @override
+  State<PasswordChangeRequiredScreen> createState() =>
+      _PasswordChangeRequiredScreenState();
+}
+
+class _PasswordChangeRequiredScreenState
+    extends State<PasswordChangeRequiredScreen> {
+  final _password = TextEditingController();
+  final _confirmation = TextEditingController();
+  bool _saving = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _password.dispose();
+    _confirmation.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    final password = _password.text;
+    if (password.length < 8) {
+      setState(
+        () => _error = 'La nueva contraseña debe tener mínimo 8 caracteres.',
+      );
+      return;
+    }
+    if (password != _confirmation.text) {
+      setState(() => _error = 'Las contraseñas no coinciden.');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await OperationsBackend.instance.completePasswordChange(
+        password: password,
+      );
+      unawaited(OperationsBackend.instance.registerPushNotifications());
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute<void>(
+          builder: (_) => widget.nextScreenBuilder(
+            widget.profile.copyWith(mustChangePassword: false),
+          ),
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = '$error'.replaceFirst('Bad state: ', ''));
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    body: SafeArea(
+      child: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 430),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: AutofillGroup(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(
+                        Icons.lock_reset_rounded,
+                        size: 42,
+                        color: AppColors.primary,
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        'Cambia tu contraseña',
+                        style: TextStyle(
+                          fontSize: 24,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'La contraseña entregada por el administrador es temporal. Define una nueva para continuar, ${widget.profile.fullName}.',
+                        style: const TextStyle(
+                          color: AppColors.muted,
+                          height: 1.45,
+                        ),
+                      ),
+                      if (_error != null) ...[
+                        const SizedBox(height: 16),
+                        Text(
+                          _error!,
+                          style: const TextStyle(
+                            color: AppColors.danger,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                      const SizedBox(height: 18),
+                      TextField(
+                        controller: _password,
+                        obscureText: true,
+                        autofillHints: const [AutofillHints.newPassword],
+                        decoration: const InputDecoration(
+                          labelText: 'Nueva contraseña',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _confirmation,
+                        obscureText: true,
+                        autofillHints: const [AutofillHints.newPassword],
+                        decoration: const InputDecoration(
+                          labelText: 'Repite la contraseña',
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: _saving ? null : _save,
+                          icon: const Icon(Icons.check_rounded),
+                          label: Text(
+                            _saving ? 'Guardando…' : 'Guardar y continuar',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+class BackendConfigurationRequiredScreen extends StatelessWidget {
+  const BackendConfigurationRequiredScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 460),
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(
+                      Icons.cloud_off_rounded,
+                      color: AppColors.danger,
+                      size: 44,
+                    ),
+                    const SizedBox(height: 16),
+                    const Text(
+                      'Conexión real requerida',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 21,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Esta compilación no tiene configurado Supabase. '
+                      'No se cargarán domicilios, usuarios ni turnos ficticios.',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: AppColors.muted, height: 1.45),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({super.key, this.allowLocalReview = false});
+
+  final bool allowLocalReview;
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
@@ -2817,12 +5200,25 @@ class _LoginScreenState extends State<LoginScreen>
     );
     unawaited(_introController.forward());
     _setInitialCredentials();
+    // Pedirlo al abrir la APK, antes del login, para que Android no deje la
+    // aplicación sin permiso por esperar únicamente a una autenticación. Se
+    // difiere hasta el primer frame para que la Activity ya esté reanudada y
+    // Android pueda mostrar el diálogo nativo sin descartarlo durante el
+    // arranque.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(_requestNotificationsOnEntry());
+    });
   }
 
   void _setInitialCredentials() {
-    if (SupabaseConfig.isConfigured) return;
-    _user.text = 'domiciliario@farmanorte.co';
-    _password.text = '123456';
+    // La revisión local entra por una ruta explícita de pruebas; no se
+    // incrustan usuarios ni contraseñas compartidas en la APK.
+  }
+
+  Future<void> _requestNotificationsOnEntry() async {
+    if (!mounted) return;
+    await OperationsBackend.instance.requestNotificationPermission();
   }
 
   @override
@@ -2837,7 +5233,11 @@ class _LoginScreenState extends State<LoginScreen>
     FocusManager.instance.primaryFocus?.unfocus();
 
     if (!SupabaseConfig.isConfigured) {
-      _enterLocalReview();
+      if (widget.allowLocalReview) {
+        _enterLocalReview();
+      } else {
+        setState(() => _error = SupabaseConfig.configurationError);
+      }
       return;
     }
 
@@ -2872,10 +5272,32 @@ class _LoginScreenState extends State<LoginScreen>
         throw StateError(
           _adminMode
               ? 'Este usuario no tiene rol de administrador.'
-              : 'Este usuario no tiene rol de domiciliario.',
+              : operationsAppAccessMessage(profile.role),
         );
       }
 
+      await OperationsBackend.instance.requestNotificationPermission();
+
+      if (profile.mustChangePassword) {
+        if (!mounted) return;
+        TextInput.finishAutofillContext(shouldSave: false);
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute<void>(
+            builder: (_) => PasswordChangeRequiredScreen(
+              profile: profile,
+              nextScreenBuilder: (updatedProfile) => _adminMode
+                  ? AdminDashboardScreen(
+                      realBackend: true,
+                      profile: updatedProfile,
+                    )
+                  : HomeScreen(profile: updatedProfile),
+            ),
+          ),
+        );
+        return;
+      }
+
+      unawaited(OperationsBackend.instance.registerPushNotifications());
       if (!mounted) return;
       TextInput.finishAutofillContext(shouldSave: _rememberCredentials);
       Navigator.of(context).pushReplacement(
@@ -2901,6 +5323,7 @@ class _LoginScreenState extends State<LoginScreen>
   }
 
   void _enterLocalReview() {
+    if (!widget.allowLocalReview) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute<void>(
         builder: (_) =>
@@ -2913,286 +5336,876 @@ class _LoginScreenState extends State<LoginScreen>
     setState(() {
       _adminMode = admin;
       _error = null;
-      _user.text = SupabaseConfig.isConfigured
-          ? ''
-          : admin
-          ? 'admin@farmanorte.co'
-          : 'domiciliario@farmanorte.co';
+      _user.text = '';
     });
     unawaited(_introController.forward(from: 0));
   }
 
-  @override
-  Widget build(BuildContext context) {
-    final title = _adminMode
-        ? 'Control de FarmaNorte'
-        : 'Bienvenido a FarmaNorte';
-    final reducedMotion = MediaQuery.of(context).disableAnimations;
+  Widget _buildProfessionalLogin(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final isWide = media.size.width >= 760;
+    final contentWidth = isWide ? 620.0 : media.size.width;
+    final heroHeight = isWide ? 500.0 : 455.0;
+    final admin = _adminMode;
+    final reducedMotion = media.disableAnimations;
+    final headline = admin
+        ? 'Todo bajo control.'
+        : 'Bienvenido,\ndomiciliario.';
+    final description = admin
+        ? 'Turnos, farmacias, usuarios y domicilios\nen un solo lugar.'
+        : 'Ingresa para recibir turnos, domicilios\ny mensajes de las farmacias.';
+
+    if (!isWide) {
+      return _buildMobileLoginLayout(context);
+    }
+
     return Scaffold(
+      backgroundColor: AppColors.pharmacyCanvas,
       body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(26, 24, 26, 20),
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 470),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  AnimatedBuilder(
-                    animation: _introProgress,
-                    builder: (context, child) {
-                      final progress = reducedMotion
-                          ? 1.0
-                          : _introProgress.value;
-                      return Transform.translate(
-                        offset: Offset(0, (1 - progress) * 8),
-                        child: Opacity(
-                          opacity: .72 + progress * .28,
-                          child: child,
-                        ),
-                      );
-                    },
-                    child: Container(
-                      width: 64,
-                      height: 64,
-                      decoration: BoxDecoration(
-                        color: AppColors.primary,
-                        borderRadius: BorderRadius.circular(20),
-                        boxShadow: [
-                          BoxShadow(
-                            color: AppColors.primary.withValues(alpha: .22),
-                            blurRadius: 20,
-                            offset: const Offset(0, 10),
-                          ),
-                        ],
-                      ),
-                      child: const Icon(
-                        Icons.local_pharmacy_rounded,
-                        color: Colors.white,
-                        size: 34,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 28),
-                  Text(
-                    _adminMode
-                        ? 'Acceso administrativo'
-                        : 'Acceso domiciliario',
-                    style: TextStyle(
-                      color: AppColors.primaryDark,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  AnimatedBuilder(
-                    animation: _introProgress,
-                    builder: (context, child) {
-                      final progress = reducedMotion
-                          ? 1.0
-                          : _introProgress.value;
-                      final characterCount = (title.length * progress)
-                          .round()
-                          .clamp(0, title.length)
-                          .toInt();
-                      final animatedTitle = title.substring(0, characterCount);
-                      return Text(
-                        '$animatedTitle${characterCount < title.length ? '▌' : ''}',
-                        semanticsLabel: title,
-                        style: const TextStyle(
-                          color: AppColors.ink,
-                          fontSize: 34,
-                          height: 1.08,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: -.8,
-                        ),
-                      );
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    _adminMode
-                        ? 'Configura zonas, turnos y cobertura de tu equipo en un solo lugar.'
-                        : 'Acepta domicilios, revisa la ruta y entrega con toda la información a la mano.',
-                    style: TextStyle(
-                      color: AppColors.muted,
-                      fontSize: 15,
-                      height: 1.45,
-                    ),
-                  ),
-                  const SizedBox(height: 32),
-                  const Text(
-                    'Perfil de acceso',
-                    style: TextStyle(
-                      color: AppColors.muted,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    width: double.infinity,
-                    child: SegmentedButton<bool>(
-                      segments: const [
-                        ButtonSegment<bool>(
-                          value: false,
-                          label: Text('Domiciliario'),
-                          icon: Icon(Icons.delivery_dining_rounded),
-                        ),
-                        ButtonSegment<bool>(
-                          value: true,
-                          label: Text('Administrador'),
-                          icon: Icon(Icons.admin_panel_settings_outlined),
-                        ),
-                      ],
-                      selected: {_adminMode},
-                      onSelectionChanged: (selection) {
-                        if (selection.isNotEmpty) {
-                          _selectRole(selection.first);
-                        }
-                      },
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  AutofillGroup(
-                    child: Column(
-                      children: [
-                        TextField(
-                          controller: _user,
-                          keyboardType: TextInputType.emailAddress,
-                          autofillHints: const [
-                            AutofillHints.username,
-                            AutofillHints.email,
-                          ],
-                          decoration: const InputDecoration(
-                            labelText: 'Usuario o correo',
-                            prefixIcon: Icon(Icons.person_outline_rounded),
-                          ),
-                        ),
-                        const SizedBox(height: 14),
-                        TextField(
-                          controller: _password,
-                          obscureText: _obscure,
-                          autofillHints: const [AutofillHints.password],
-                          decoration: InputDecoration(
-                            labelText: 'Contraseña',
-                            prefixIcon: const Icon(Icons.lock_outline_rounded),
-                            suffixIcon: IconButton(
-                              tooltip: 'Mostrar contraseña',
-                              onPressed: () =>
-                                  setState(() => _obscure = !_obscure),
-                              icon: Icon(
-                                _obscure
-                                    ? Icons.visibility_outlined
-                                    : Icons.visibility_off_outlined,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final width = contentWidth > constraints.maxWidth
+                ? constraints.maxWidth
+                : contentWidth;
+            return SingleChildScrollView(
+              padding: const EdgeInsets.only(bottom: 30),
+              child: Center(
+                child: SizedBox(
+                  width: width,
+                  child: Column(
                     children: [
-                      Row(
-                        children: [
-                          Checkbox.adaptive(
-                            value: _rememberCredentials,
-                            onChanged: (value) => setState(
-                              () => _rememberCredentials = value ?? false,
-                            ),
+                      Container(
+                        height: heroHeight,
+                        width: double.infinity,
+                        clipBehavior: Clip.hardEdge,
+                        decoration: const BoxDecoration(
+                          color: AppColors.pharmacyBlueDeep,
+                          borderRadius: BorderRadius.only(
+                            bottomLeft: Radius.circular(72),
+                            bottomRight: Radius.circular(72),
                           ),
-                          const Expanded(
-                            child: Text(
-                              'Permitir guardar acceso en Google Password Manager',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                color: AppColors.muted,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: TextButton(
-                          onPressed: () => ScaffoldMessenger.of(context)
-                              .showSnackBar(
-                                const SnackBar(
-                                  content: Text(
-                                    'Solicita al administrador una nueva contraseña temporal.',
+                        ),
+                        child: Stack(
+                          children: [
+                            Positioned(
+                              right: -118,
+                              top: 34,
+                              child: Container(
+                                width: 380,
+                                height: 380,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: AppColors.primary.withValues(
+                                    alpha: .20,
                                   ),
                                 ),
                               ),
-                          style: TextButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(horizontal: 8),
-                            minimumSize: Size.zero,
+                            ),
+                            Positioned(
+                              right: -12,
+                              top: 116,
+                              child: Container(
+                                width: 218,
+                                height: 218,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: Colors.white.withValues(alpha: .06),
+                                ),
+                              ),
+                            ),
+                            Positioned.fill(
+                              child: CustomPaint(
+                                painter: const _LoginRoutePainter(),
+                              ),
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(
+                                28,
+                                28,
+                                28,
+                                34,
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Container(
+                                    width: 268,
+                                    height: 68,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 8,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white,
+                                      borderRadius: BorderRadius.circular(12),
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.black.withValues(
+                                            alpha: .12,
+                                          ),
+                                          blurRadius: 16,
+                                          offset: const Offset(0, 8),
+                                        ),
+                                      ],
+                                    ),
+                                    child: Image.asset(
+                                      'assets/farmanorte-brand.png',
+                                      fit: BoxFit.contain,
+                                      alignment: Alignment.centerLeft,
+                                      semanticLabel: 'farmanorte',
+                                    ),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  Text(
+                                    admin
+                                        ? 'PANEL DE OPERACIÓN'
+                                        : 'RED DE DOMICILIOS',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      color: Colors.white.withValues(
+                                        alpha: .82,
+                                      ),
+                                      fontSize: 13,
+                                      letterSpacing: 1.7,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  AnimatedBuilder(
+                                    animation: _introProgress,
+                                    builder: (context, child) {
+                                      final progress = reducedMotion
+                                          ? 1.0
+                                          : _introProgress.value;
+                                      final characterCount =
+                                          (headline.length * progress)
+                                              .round()
+                                              .clamp(0, headline.length)
+                                              .toInt();
+                                      final animatedHeadline = headline
+                                          .substring(0, characterCount);
+                                      return Text(
+                                        '$animatedHeadline${characterCount < headline.length ? '▌' : ''}',
+                                        semanticsLabel: admin
+                                            ? 'Control de $farmanorteBrandName'
+                                            : 'Bienvenido a $farmanorteBrandName',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 39,
+                                          height: 1.12,
+                                          fontWeight: FontWeight.w900,
+                                          letterSpacing: -.7,
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    description,
+                                    style: TextStyle(
+                                      color: Colors.white.withValues(
+                                        alpha: .86,
+                                      ),
+                                      fontSize: 18,
+                                      height: 1.45,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Transform.translate(
+                        offset: const Offset(0, -84),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 24),
+                          child: _buildProfessionalLoginCard(context),
+                        ),
+                      ),
+                      Transform.translate(
+                        offset: const Offset(0, -58),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 24),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                Icons.verified_user_outlined,
+                                size: 18,
+                                color: AppColors.pharmacyBlue,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  admin
+                                      ? 'Sesión segura · $farmanorteBrandName Administración'
+                                      : 'Acceso protegido para domiciliarios',
+                                  style: const TextStyle(
+                                    color: AppColors.muted,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                            ],
                           ),
-                          child: const Text('¿Olvidaste tu clave?'),
                         ),
                       ),
                     ],
                   ),
-                  const SizedBox(height: 16),
-                  FilledButton.icon(
-                    onPressed: _isLoading ? null : _login,
-                    icon: _isLoading
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMobileLoginLayout(BuildContext context) {
+    final media = MediaQuery.of(context);
+    final admin = _adminMode;
+    final compactHeight = media.size.height < 720;
+    final tight = media.size.height < 760;
+    final headline = admin
+        ? 'Todo bajo control.'
+        : 'Bienvenido,\ndomiciliario.';
+    final description = admin
+        ? 'Turnos, farmacias y domicilios en un solo lugar.'
+        : 'Ingresa para recibir turnos, domicilios y mensajes.';
+
+    return Scaffold(
+      backgroundColor: AppColors.pharmacyCanvas,
+      body: SafeArea(
+        child: Column(
+          children: [
+            _buildLoginHero(
+              height: tight
+                  ? 148
+                  : compactHeight
+                  ? 158
+                  : 174,
+              compact: true,
+              tight: tight,
+              admin: admin,
+              headline: headline,
+              description: description,
+              reducedMotion: media.disableAnimations,
+            ),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                child: _buildProfessionalLoginCard(
+                  context,
+                  compact: true,
+                  tight: tight,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLoginHero({
+    required double height,
+    required bool compact,
+    required bool admin,
+    required String headline,
+    required String description,
+    required bool reducedMotion,
+    bool tight = false,
+  }) {
+    final brandWidth = compact ? (tight ? 184.0 : 194.0) : 272.0;
+
+    return Container(
+      height: height,
+      width: double.infinity,
+      clipBehavior: Clip.hardEdge,
+      decoration: BoxDecoration(
+        color: AppColors.pharmacyBlueDeep,
+        borderRadius: BorderRadius.only(
+          bottomLeft: Radius.circular(compact ? 42 : 72),
+          bottomRight: Radius.circular(compact ? 42 : 72),
+        ),
+      ),
+      child: Stack(
+        children: [
+          Positioned(
+            right: compact ? -132 : -118,
+            top: compact ? 24 : 34,
+            child: Container(
+              width: compact ? 300 : 380,
+              height: compact ? 300 : 380,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: AppColors.primary.withValues(alpha: .20),
+              ),
+            ),
+          ),
+          Positioned(
+            right: compact ? -30 : -12,
+            top: compact ? 84 : 116,
+            child: Container(
+              width: compact ? 176 : 218,
+              height: compact ? 176 : 218,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white.withValues(alpha: .06),
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: CustomPaint(painter: const _LoginRoutePainter()),
+          ),
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              compact ? (tight ? 16 : 20) : 28,
+              compact ? (tight ? 10 : 16) : 28,
+              compact ? (tight ? 16 : 20) : 28,
+              compact ? (tight ? 6 : 12) : 34,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Container(
+                        width: brandWidth + (compact ? 16 : 0),
+                        height: compact ? (tight ? 42 : 50) : 68,
+                        padding: EdgeInsets.symmetric(
+                          horizontal: compact ? 8 : 12,
+                          vertical: compact ? 5 : 8,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(10),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: .12),
+                              blurRadius: 12,
+                              offset: const Offset(0, 6),
                             ),
-                          )
-                        : Icon(
-                            _adminMode
-                                ? Icons.dashboard_customize_rounded
-                                : Icons.arrow_forward_rounded,
-                          ),
-                    label: Text(
-                      _isLoading
-                          ? 'Verificando…'
-                          : _adminMode
-                          ? 'Entrar al panel'
-                          : 'Ingresar',
-                    ),
-                  ),
-                  if (_error != null) ...[
-                    const SizedBox(height: 10),
-                    Text(
-                      _error!,
-                      style: const TextStyle(
-                        color: AppColors.danger,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
+                          ],
+                        ),
+                        child: Image.asset(
+                          'assets/farmanorte-brand.png',
+                          fit: BoxFit.contain,
+                          alignment: Alignment.centerLeft,
+                          semanticLabel: 'farmanorte',
+                        ),
                       ),
                     ),
                   ],
-                  const SizedBox(height: 22),
-                  Center(
-                    child: Text(
-                      'Versión operativa 0.9.0',
+                ),
+                const Spacer(),
+                AnimatedBuilder(
+                  animation: _introProgress,
+                  builder: (context, child) {
+                    final progress = reducedMotion ? 1.0 : _introProgress.value;
+                    final characterCount = (headline.length * progress)
+                        .round()
+                        .clamp(0, headline.length)
+                        .toInt();
+                    final animatedHeadline = headline.substring(
+                      0,
+                      characterCount,
+                    );
+                    return Text(
+                      '$animatedHeadline${characterCount < headline.length ? '▌' : ''}',
+                      semanticsLabel: admin
+                          ? 'Control de $farmanorteBrandName'
+                          : 'Bienvenido a $farmanorteBrandName',
                       style: TextStyle(
-                        color: AppColors.muted.withValues(alpha: .8),
-                        fontSize: 12,
+                        color: Colors.white,
+                        fontSize: compact ? (tight ? 23 : 27) : 39,
+                        height: 1.08,
+                        fontWeight: FontWeight.w900,
+                        letterSpacing: compact ? -.4 : -.7,
+                      ),
+                    );
+                  },
+                ),
+                SizedBox(height: compact ? (tight ? 4 : 6) : 16),
+                Text(
+                  description,
+                  maxLines: compact ? 2 : null,
+                  overflow: compact ? TextOverflow.ellipsis : null,
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: .86),
+                    fontSize: compact ? (tight ? 11.5 : 12.5) : 18,
+                    height: compact ? (tight ? 1.18 : 1.25) : 1.45,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProfessionalLoginCard(
+    BuildContext context, {
+    bool compact = false,
+    bool tight = false,
+  }) {
+    final admin = _adminMode;
+    final baseTheme = Theme.of(context);
+    final inputTheme = baseTheme.inputDecorationTheme.copyWith(
+      filled: true,
+      fillColor: const Color(0xFFFBFDFF),
+      labelStyle: const TextStyle(
+        color: AppColors.muted,
+        fontWeight: FontWeight.w600,
+      ),
+      floatingLabelStyle: const TextStyle(
+        color: AppColors.pharmacyBlue,
+        fontWeight: FontWeight.w700,
+      ),
+      prefixIconColor: AppColors.pharmacyBlue,
+      suffixIconColor: AppColors.muted,
+      contentPadding: EdgeInsets.symmetric(
+        horizontal: compact ? 14 : 18,
+        vertical: tight
+            ? 8
+            : compact
+            ? 12
+            : 18,
+      ),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(compact ? 15 : 18),
+        borderSide: const BorderSide(color: Color(0xFFC9D8E7), width: 1.4),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(compact ? 15 : 18),
+        borderSide: const BorderSide(color: Color(0xFFC9D8E7), width: 1.4),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(compact ? 15 : 18),
+        borderSide: const BorderSide(color: AppColors.pharmacyBlue, width: 2),
+      ),
+    );
+
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.fromLTRB(
+        compact ? (tight ? 16 : 20) : 26,
+        compact ? (tight ? 12 : 18) : 30,
+        compact ? (tight ? 16 : 20) : 26,
+        compact ? (tight ? 10 : 14) : 22,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(compact ? 24 : 32),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.pharmacyBlueDeep.withValues(alpha: .15),
+            blurRadius: 28,
+            offset: const Offset(0, 14),
+          ),
+        ],
+      ),
+      child: Theme(
+        data: baseTheme.copyWith(
+          colorScheme: baseTheme.colorScheme.copyWith(
+            primary: AppColors.pharmacyBlue,
+            secondary: AppColors.primary,
+          ),
+          inputDecorationTheme: inputTheme,
+        ),
+        child: AutofillGroup(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                height: compact ? 4 : 6,
+                width: compact ? 62 : 76,
+                decoration: BoxDecoration(
+                  color: admin ? AppColors.pharmacyBlue : AppColors.primary,
+                  borderRadius: BorderRadius.circular(99),
+                ),
+              ),
+              SizedBox(height: compact ? (tight ? 8 : 12) : 24),
+              Text(
+                admin ? 'ACCESO ADMINISTRATIVO' : 'ACCESO DE DOMICILIARIO',
+                style: TextStyle(
+                  color: admin ? AppColors.pharmacyBlue : AppColors.primaryDark,
+                  fontSize: compact ? (tight ? 9.5 : 10.5) : 13,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: compact ? 1.3 : 1.7,
+                ),
+              ),
+              SizedBox(height: compact ? (tight ? 4 : 6) : 12),
+              Text(
+                'Iniciar sesión',
+                style: TextStyle(
+                  color: AppColors.ink,
+                  fontSize: compact ? (tight ? 25 : 28) : 34,
+                  height: 1.1,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: compact ? -.5 : -.8,
+                ),
+              ),
+              SizedBox(height: compact ? (tight ? 4 : 6) : 10),
+              Text(
+                admin
+                    ? 'Ingresa para gestionar la operación completa de $farmanorteBrandName.'
+                    : 'Usa las credenciales que te asignó el administrador.',
+                style: TextStyle(
+                  color: AppColors.muted,
+                  fontSize: compact ? (tight ? 12 : 13) : 16,
+                  height: compact ? (tight ? 1.2 : 1.3) : 1.45,
+                ),
+              ),
+              SizedBox(height: compact ? (tight ? 8 : 12) : 22),
+              _buildRoleSwitcher(compact: compact),
+              SizedBox(height: compact ? (tight ? 7 : 10) : 20),
+              TextField(
+                controller: _user,
+                keyboardType: TextInputType.emailAddress,
+                autofillHints: const [
+                  AutofillHints.username,
+                  AutofillHints.email,
+                ],
+                decoration: InputDecoration(
+                  labelText: 'Usuario o correo',
+                  prefixIcon: const Icon(Icons.person_outline_rounded),
+                ),
+              ),
+              SizedBox(height: compact ? (tight ? 6 : 8) : 14),
+              TextField(
+                controller: _password,
+                obscureText: _obscure,
+                autofillHints: const [AutofillHints.password],
+                decoration: InputDecoration(
+                  labelText: 'Contraseña',
+                  prefixIcon: const Icon(Icons.lock_outline_rounded),
+                  suffixIcon: IconButton(
+                    tooltip: _obscure
+                        ? 'Mostrar contraseña'
+                        : 'Ocultar contraseña',
+                    onPressed: () => setState(() => _obscure = !_obscure),
+                    icon: Icon(
+                      _obscure
+                          ? Icons.visibility_outlined
+                          : Icons.visibility_off_outlined,
+                    ),
+                  ),
+                ),
+              ),
+              SizedBox(height: compact ? (tight ? 4 : 6) : 8),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final narrowOptions = constraints.maxWidth < 390;
+                  final rememberRow = Row(
+                    children: [
+                      Checkbox.adaptive(
+                        value: _rememberCredentials,
+                        activeColor: AppColors.pharmacyBlue,
+                        visualDensity: compact
+                            ? VisualDensity.compact
+                            : VisualDensity.standard,
+                        materialTapTargetSize: compact
+                            ? MaterialTapTargetSize.shrinkWrap
+                            : MaterialTapTargetSize.padded,
+                        onChanged: (value) => setState(
+                          () => _rememberCredentials = value ?? false,
+                        ),
+                      ),
+                      Expanded(
+                        child: Text(
+                          'Mantener sesión iniciada',
+                          style: TextStyle(
+                            color: AppColors.muted,
+                            fontSize: compact ? (tight ? 10.5 : 11.5) : 13,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ],
+                  );
+                  final forgotButton = TextButton(
+                    onPressed: () => ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text(
+                          'Solicita al administrador una nueva contraseña temporal.',
+                        ),
+                      ),
+                    ),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      minimumSize: Size.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      textStyle: TextStyle(
+                        fontSize: compact ? (tight ? 10 : 11) : 14,
+                      ),
+                    ),
+                    child: const Text('¿Olvidaste tu clave?'),
+                  );
+                  return compact
+                      ? Row(
+                          children: [
+                            Expanded(child: rememberRow),
+                            forgotButton,
+                          ],
+                        )
+                      : narrowOptions
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            rememberRow,
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: forgotButton,
+                            ),
+                          ],
+                        )
+                      : Row(
+                          children: [
+                            Expanded(child: rememberRow),
+                            forgotButton,
+                          ],
+                        );
+                },
+              ),
+              SizedBox(height: compact ? (tight ? 7 : 10) : 16),
+              SizedBox(
+                width: double.infinity,
+                height: tight
+                    ? 46
+                    : compact
+                    ? 50
+                    : 58,
+                child: FilledButton.icon(
+                  onPressed: _isLoading ? null : _login,
+                  icon: _isLoading
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : Icon(
+                          admin
+                              ? Icons.dashboard_customize_rounded
+                              : Icons.arrow_forward_rounded,
+                        ),
+                  label: Text(
+                    _isLoading
+                        ? 'Verificando…'
+                        : admin
+                        ? 'Entrar al panel'
+                        : 'Entrar a mi jornada',
+                    style: TextStyle(
+                      fontSize: compact ? (tight ? 13 : 14) : 17,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: AppColors.pharmacyBlue,
+                    foregroundColor: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(compact ? 18 : 22),
+                    ),
+                  ),
+                ),
+              ),
+              if (_error != null) ...[
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF0F0),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: const Color(0xFFF4C6C6)),
+                  ),
+                  child: Text(
+                    _error!,
+                    style: const TextStyle(
+                      color: AppColors.danger,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      height: 1.35,
+                    ),
+                  ),
+                ),
+              ],
+              SizedBox(height: compact ? (tight ? 10 : 14) : 20),
+              const Divider(color: AppColors.line),
+              SizedBox(height: compact ? (tight ? 6 : 8) : 14),
+              Row(
+                children: [
+                  Icon(
+                    Icons.verified_user_outlined,
+                    color: admin
+                        ? AppColors.pharmacyBlue
+                        : AppColors.primaryDark,
+                    size: compact ? (tight ? 16 : 18) : 22,
+                  ),
+                  SizedBox(width: compact ? (tight ? 6 : 8) : 12),
+                  Expanded(
+                    child: Text(
+                      admin
+                          ? 'Acceso administrativo protegido.\nPermisos completos de la operación.'
+                          : 'Acceso protegido para personal autorizado.\nTu jornada se sincroniza con las farmacias.',
+                      style: TextStyle(
+                        color: AppColors.muted,
+                        fontSize: compact ? (tight ? 10 : 11) : 13,
+                        height: compact ? (tight ? 1.15 : 1.25) : 1.4,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
                   ),
                 ],
               ),
-            ),
+            ],
           ),
         ),
       ),
     );
   }
+
+  Widget _buildRoleSwitcher({bool compact = false}) {
+    return Container(
+      height: compact ? 44 : 52,
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF1F5FA),
+        borderRadius: BorderRadius.circular(compact ? 15 : 18),
+        border: Border.all(color: const Color(0xFFE3EAF2)),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: _buildRoleOption(
+              label: 'Domiciliario',
+              admin: false,
+              compact: compact,
+            ),
+          ),
+          Expanded(
+            child: _buildRoleOption(
+              label: 'Administrador',
+              admin: true,
+              compact: compact,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRoleOption({
+    required String label,
+    required bool admin,
+    bool compact = false,
+  }) {
+    final selected = _adminMode == admin;
+    return GestureDetector(
+      onTap: () {
+        if (!selected) _selectRole(admin);
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: selected ? Colors.white : Colors.transparent,
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: selected
+              ? [
+                  BoxShadow(
+                    color: AppColors.pharmacyBlue.withValues(alpha: .12),
+                    blurRadius: 12,
+                    offset: const Offset(0, 4),
+                  ),
+                ]
+              : null,
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? AppColors.pharmacyBlue : AppColors.muted,
+            fontSize: compact ? 12.5 : 14,
+            fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => _buildProfessionalLogin(context);
+}
+
+class _LoginRoutePainter extends CustomPainter {
+  const _LoginRoutePainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final guide = Paint()
+      ..color = Colors.white.withValues(alpha: .14)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.4;
+    final accent = Paint()
+      ..color = AppColors.primary.withValues(alpha: .66)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.4;
+
+    final guidePath = Path()
+      ..moveTo(-24, size.height * .78)
+      ..cubicTo(
+        size.width * .22,
+        size.height * .60,
+        size.width * .36,
+        size.height * .90,
+        size.width * .52,
+        size.height * .66,
+      )
+      ..cubicTo(
+        size.width * .68,
+        size.height * .42,
+        size.width * .77,
+        size.height * .58,
+        size.width + 28,
+        size.height * .44,
+      );
+    canvas.drawPath(guidePath, guide);
+
+    final accentPath = Path()
+      ..moveTo(-18, size.height * .88)
+      ..cubicTo(
+        size.width * .20,
+        size.height * .70,
+        size.width * .36,
+        size.height * 1.02,
+        size.width * .55,
+        size.height * .78,
+      )
+      ..cubicTo(
+        size.width * .72,
+        size.height * .56,
+        size.width * .82,
+        size.height * .72,
+        size.width + 18,
+        size.height * .60,
+      );
+    canvas.drawPath(accentPath, accent);
+  }
+
+  @override
+  bool shouldRepaint(covariant _LoginRoutePainter oldDelegate) => false;
 }
 
 class SupabaseSessionVerifiedScreen extends StatelessWidget {
@@ -3358,7 +6371,8 @@ class _PharmacyDeskScreenState extends State<PharmacyDeskScreen> {
       hasDataphone: isDataphone,
     );
     final originName = _needsPlace ? _externalPlace.text.trim() : 'FN 155';
-    final id = 'FN-155-${DateTime.now().millisecondsSinceEpoch % 100000}';
+    final id =
+        'FN155${(DateTime.now().millisecondsSinceEpoch % 100000).toString().padLeft(5, '0')}';
     final delivery = Delivery(
       id: id,
       storeName: isCross || isPurchase ? originName : 'FN 155',
@@ -3438,11 +6452,18 @@ class _PharmacyDeskScreenState extends State<PharmacyDeskScreen> {
   }
 
   void _logout() {
-    unawaited(OperationsBackend.instance.signOut());
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
-      (_) => false,
-    );
+    unawaited(() async {
+      try {
+        await OperationsBackend.instance.signOut();
+      } catch (_) {
+        // La navegación local no debe quedar bloqueada por un error remoto.
+      }
+      if (!mounted) return;
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
+        (_) => false,
+      );
+    }());
   }
 
   @override
@@ -3829,7 +6850,7 @@ class _PharmacyFormCard extends StatelessWidget {
           child: FilledButton.icon(
             onPressed: onCreate,
             icon: const Icon(Icons.campaign_outlined),
-            label: const Text('Publicar domicilio · oferta de 3 minutos'),
+            label: const Text('Publicar domicilio · oferta de 5 minutos'),
           ),
         ),
       ],
@@ -3936,7 +6957,7 @@ class _PharmacyDeliveryCard extends StatelessWidget {
   }
 }
 
-enum _AdminSection { overview, zones, pharmacies, shifts, users }
+enum _AdminSection { overview, zones, pharmacies, shifts, users, settings }
 
 extension _AdminSectionX on _AdminSection {
   String get label => switch (this) {
@@ -3945,6 +6966,7 @@ extension _AdminSectionX on _AdminSection {
     _AdminSection.pharmacies => 'Farmacias',
     _AdminSection.shifts => 'Turnos',
     _AdminSection.users => 'Usuarios',
+    _AdminSection.settings => 'Configuración',
   };
 
   IconData get icon => switch (this) {
@@ -3953,6 +6975,7 @@ extension _AdminSectionX on _AdminSection {
     _AdminSection.pharmacies => Icons.local_pharmacy_outlined,
     _AdminSection.shifts => Icons.schedule_rounded,
     _AdminSection.users => Icons.manage_accounts_outlined,
+    _AdminSection.settings => Icons.settings_outlined,
   };
 }
 
@@ -3975,6 +6998,10 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   List<AdminPharmacy> _pharmacies = const [];
   List<AdminShift> _shifts = const [];
   List<AdminUser> _users = const [];
+  List<AdminCourierFeeSummary> _courierFeeSummaries = const [];
+  String _equivalentPaymentTiming = 'end_of_shift';
+  final DateTime _feeWeekStart = adminPublishWeekStart(_adminToday());
+  bool _loadingFeeSummaries = false;
   _AdminSection _section = _AdminSection.overview;
   bool _loadingRemote = false;
   String? _remoteError;
@@ -4009,11 +7036,261 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         _shifts = snapshot.shifts;
         _users = snapshot.users;
       });
+      unawaited(_loadAdminFeeSummaries());
+      unawaited(_loadEquivalentPaymentTiming());
     } catch (error) {
       if (!mounted) return;
       setState(() => _remoteError = '$error'.replaceFirst('Bad state: ', ''));
     } finally {
       if (mounted) setState(() => _loadingRemote = false);
+    }
+  }
+
+  Future<void> _loadAdminFeeSummaries() async {
+    if (!widget.realBackend || !mounted) return;
+    setState(() => _loadingFeeSummaries = true);
+    try {
+      final summaries = await OperationsBackend.instance
+          .loadAdminCourierFeeSummary(weekStart: _feeWeekStart);
+      if (mounted) setState(() => _courierFeeSummaries = summaries);
+    } catch (error) {
+      if (mounted) _showRemoteMessage('No se pudo cargar la cuota: $error');
+    } finally {
+      if (mounted) setState(() => _loadingFeeSummaries = false);
+    }
+  }
+
+  Future<void> _loadEquivalentPaymentTiming() async {
+    if (!widget.realBackend || !mounted) return;
+    try {
+      final timing = await OperationsBackend.instance
+          .loadEquivalentPaymentTiming();
+      if (mounted) setState(() => _equivalentPaymentTiming = timing);
+    } catch (_) {
+      // Se conserva el valor seguro por defecto: liquidación al cierre.
+    }
+  }
+
+  Future<void> _editEquivalentPaymentTiming() async {
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Liquidación de equivalentes'),
+        content: RadioGroup<String>(
+          groupValue: _equivalentPaymentTiming,
+          onChanged: (value) => Navigator.pop(dialogContext, value),
+          child: const Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              RadioListTile<String>(
+                value: 'immediate',
+                title: Text('Inmediata'),
+                subtitle: Text(
+                  'La farmacia registra el pago al recibir el soporte firmado.',
+                ),
+              ),
+              RadioListTile<String>(
+                value: 'end_of_shift',
+                title: Text('Al cierre del turno'),
+                subtitle: Text('Se acumula para la liquidación del turno.'),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancelar'),
+          ),
+        ],
+      ),
+    );
+    if (selected == null || !mounted || !widget.realBackend) return;
+    try {
+      await OperationsBackend.instance.updateEquivalentPaymentTiming(
+        timing: selected,
+      );
+      if (mounted) {
+        setState(() => _equivalentPaymentTiming = selected);
+        _showRemoteMessage('Regla de liquidación guardada.');
+      }
+    } catch (error) {
+      _showRemoteMessage('No se pudo guardar la liquidación: $error');
+    }
+  }
+
+  Future<void> _editCourierFeeSettings() async {
+    final first = _courierFeeSummaries.isEmpty
+        ? null
+        : _courierFeeSummaries.first;
+    final dailyController = TextEditingController(
+      text: (first?.dailyAmount ?? 8000).round().toString(),
+    );
+    final doubleController = TextEditingController(
+      text: (first?.doubleShiftSurcharge ?? 2000).round().toString(),
+    );
+    final values = await showDialog<(double, double)>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Configurar cuotas'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: dailyController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Cuota por día',
+                prefixText: '\$ ',
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: doubleController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Recargo por doble turno',
+                prefixText: '\$ ',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final daily = double.tryParse(
+                dailyController.text.replaceAll(',', '.'),
+              );
+              final extra = double.tryParse(
+                doubleController.text.replaceAll(',', '.'),
+              );
+              if (daily == null || extra == null || daily < 0 || extra < 0) {
+                return;
+              }
+              Navigator.pop(dialogContext, (daily, extra));
+            },
+            child: const Text('Guardar'),
+          ),
+        ],
+      ),
+    );
+    dailyController.dispose();
+    doubleController.dispose();
+    if (values == null || !mounted) return;
+    try {
+      await OperationsBackend.instance.updateCourierFeeSettings(
+        dailyAmount: values.$1,
+        doubleShiftSurcharge: values.$2,
+      );
+      await _loadAdminFeeSummaries();
+      _showRemoteMessage('Cuotas actualizadas para los próximos cálculos.');
+    } catch (error) {
+      _showRemoteMessage('No se pudo actualizar la cuota: $error');
+    }
+  }
+
+  Future<void> _recordFeePayment(AdminCourierFeeSummary summary) async {
+    if (!widget.realBackend || summary.courierId.trim().isEmpty) return;
+    final amountController = TextEditingController(
+      text: summary.balanceDue > 0 ? summary.balanceDue.round().toString() : '',
+    );
+    final noteController = TextEditingController();
+    var paymentMethod = 'cash';
+    final values = await showDialog<(double, String, String?)>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('Registrar abono · ${summary.courierName}'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Saldo pendiente de esta semana: ${_money(summary.balanceDue)}',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: amountController,
+                  autofocus: true,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Valor del abono',
+                    prefixText: '\$ ',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: paymentMethod,
+                  decoration: const InputDecoration(labelText: 'Forma de pago'),
+                  items: const [
+                    DropdownMenuItem(value: 'cash', child: Text('Efectivo')),
+                    DropdownMenuItem(
+                      value: 'transfer',
+                      child: Text('Transferencia'),
+                    ),
+                    DropdownMenuItem(value: 'other', child: Text('Otro')),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      setDialogState(() => paymentMethod = value);
+                    }
+                  },
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: noteController,
+                  maxLength: 180,
+                  decoration: const InputDecoration(
+                    labelText: 'Nota opcional',
+                    hintText: 'Ej. Liquidación del lunes',
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final amount = double.tryParse(
+                  amountController.text.replaceAll(',', '.'),
+                );
+                if (amount == null || amount <= 0) return;
+                Navigator.pop(dialogContext, (
+                  amount,
+                  paymentMethod,
+                  noteController.text.trim(),
+                ));
+              },
+              child: const Text('Guardar abono'),
+            ),
+          ],
+        ),
+      ),
+    );
+    amountController.dispose();
+    noteController.dispose();
+    if (values == null || !mounted) return;
+    try {
+      await OperationsBackend.instance.recordCourierFeePayment(
+        courierId: summary.courierId,
+        weekStart: _feeWeekStart,
+        amount: values.$1,
+        paymentMethod: values.$2,
+        note: values.$3,
+      );
+      await _loadAdminFeeSummaries();
+      _showRemoteMessage('Abono registrado y saldo actualizado.');
+    } catch (error) {
+      _showRemoteMessage('No se pudo registrar el abono: $error');
     }
   }
 
@@ -4196,11 +7473,18 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   }
 
   void _logout() {
-    unawaited(OperationsBackend.instance.signOut());
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
-      (_) => false,
-    );
+    unawaited(() async {
+      try {
+        await OperationsBackend.instance.signOut();
+      } catch (_) {
+        // La navegación local no debe quedar bloqueada por un error remoto.
+      }
+      if (!mounted) return;
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
+        (_) => false,
+      );
+    }());
   }
 
   Future<void> _createOrEditZone([AdminZone? current]) async {
@@ -4382,13 +7666,11 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           if (password == null || password.isEmpty) {
             throw StateError('Define una contraseña inicial para el usuario.');
           }
-          await SupabaseOperationsService.instance.createAdminUser(
-            user: user,
-            password: password,
-          );
+          final createdUser = await SupabaseOperationsService.instance
+              .createAdminUser(user: user, password: password);
           await _loadRemote();
           _showRemoteMessage(
-            'Usuario ${user.username} creado. Entrará con ese usuario y la contraseña inicial definida.',
+            'Usuario ${user.username} creado. Contraseña temporal: ${createdUser.temporaryPassword ?? password}',
           );
         } else {
           await SupabaseOperationsService.instance.saveAdminProfile(user);
@@ -4407,7 +7689,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         }
       } catch (error) {
         _showRemoteMessage(
-          'No se pudo actualizar el perfil: ${'$error'.replaceFirst('Bad state: ', '')}',
+          'No se pudo guardar el usuario: ${_friendlyUserError(error)}',
         );
       }
       return;
@@ -4423,6 +7705,23 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         if (index >= 0) _users[index] = user;
       }
     });
+  }
+
+  String _friendlyUserError(Object error) {
+    final message = '$error'.replaceFirst('Bad state: ', '').trim();
+    final normalized = message.toLowerCase();
+    if (normalized.contains('duplicate') ||
+        normalized.contains('unique constraint') ||
+        normalized.contains('ya existe')) {
+      return 'ese usuario ya existe. Usa otro usuario; los perfiles nuevos reciben un identificador interno automáticamente.';
+    }
+    if (normalized.contains('permission denied') ||
+        normalized.contains('forbidden') ||
+        normalized.contains('403')) {
+      return 'la sesión actual no tiene permiso para realizar esta acción.';
+    }
+    if (message.isEmpty) return 'revisa los datos e inténtalo nuevamente.';
+    return message;
   }
 
   Future<void> _resetUserPassword(AdminUser user) async {
@@ -4445,7 +7744,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           password: password,
         );
         _showRemoteMessage(
-          'Contraseña restablecida para ${user.name}. El perfil y su historial se conservaron.',
+          'Contraseña temporal restablecida para ${user.name}: $password. El perfil y su historial se conservaron.',
         );
       } catch (error) {
         _showRemoteMessage(
@@ -4519,7 +7818,99 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     _AdminSection.pharmacies => _buildPharmacies(),
     _AdminSection.shifts => _buildShifts(),
     _AdminSection.users => _buildUsers(),
+    _AdminSection.settings => _buildSettings(),
   };
+
+  Widget _buildSettings() => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      _AdminPageHeader(
+        eyebrow: 'CONTROL DEL SISTEMA',
+        title: 'Configuración',
+        subtitle: 'Define cómo se liberan los equivalentes y cómo se liquida el equipo.',
+      ),
+      const SizedBox(height: 22),
+      _AdminPanel(
+        eyebrow: 'EQUIVALENTES',
+        title: 'Firma obligatoria antes de liberar',
+        icon: Icons.verified_outlined,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Un equivalente queda pendiente por firmar hasta que el domiciliario dibuje su firma en pantalla. Mientras esté pendiente, la farmacia no lo puede consultar y el valor no se suma a sus ganancias.',
+              style: TextStyle(
+                color: AppColors.muted,
+                fontSize: 12,
+                height: 1.4,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.mint,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.lock_clock_outlined, color: AppColors.primaryDark),
+                  SizedBox(width: 9),
+                  Expanded(
+                    child: Text(
+                      'Regla activa en Supabase: draft → firma → visible para farmacia.',
+                      style: TextStyle(
+                        color: AppColors.primaryDark,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 16),
+      _AdminPanel(
+        eyebrow: 'LIQUIDACIÓN',
+        title: 'Pago del equivalente firmado',
+        icon: Icons.account_balance_wallet_outlined,
+        action: TextButton(
+          onPressed: widget.realBackend ? _editEquivalentPaymentTiming : null,
+          child: const Text('Cambiar'),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              _equivalentPaymentTiming == 'immediate'
+                  ? Icons.flash_on_outlined
+                  : Icons.event_available_outlined,
+              color: AppColors.warning,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                _equivalentPaymentTiming == 'immediate'
+                    ? 'Liquidación inmediata al recibir el equivalente firmado.'
+                    : 'Liquidación acumulada al cierre del turno.',
+                style: const TextStyle(
+                  color: AppColors.ink,
+                  fontSize: 12,
+                  height: 1.35,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 16),
+      _courierFeesPanel(),
+    ],
+  );
 
   Widget _buildOverview(bool wide) {
     final metrics = [
@@ -4565,7 +7956,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
           title: 'Centro de operaciones',
           subtitle: widget.realBackend
               ? 'Datos reales del proyecto Supabase. El piloto todavía no está asignado.'
-              : 'Organiza la cobertura de FarmaNorte y prepara el día de tu equipo.',
+              : 'Organiza la cobertura de farmanorte y prepara el día de tu equipo.',
           action: FilledButton.icon(
             onPressed: () => _createOrEditShift(),
             icon: const Icon(Icons.add_rounded),
@@ -4626,9 +8017,124 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         ],
         const SizedBox(height: 16),
         _pharmaciesPanel(),
+        const SizedBox(height: 16),
+        _courierFeesPanel(),
       ],
     );
   }
+
+  Widget _courierFeesPanel() => _AdminPanel(
+    eyebrow: 'CUOTAS DEL EQUIPO',
+    title: 'Deuda semanal de domiciliarios',
+    icon: Icons.account_balance_wallet_outlined,
+    action: Wrap(
+      spacing: 6,
+      children: [
+        IconButton(
+          tooltip: 'Actualizar cuotas',
+          onPressed: _loadingFeeSummaries ? null : _loadAdminFeeSummaries,
+          icon: const Icon(Icons.refresh_rounded),
+        ),
+        TextButton(
+          onPressed: widget.realBackend ? _editCourierFeeSettings : null,
+          child: const Text('Configurar'),
+        ),
+      ],
+    ),
+    child: _loadingFeeSummaries
+        ? const LinearProgressIndicator()
+        : _courierFeeSummaries.isEmpty
+        ? const _AdminEmptyState(
+            icon: Icons.account_balance_wallet_outlined,
+            title: 'Cuotas pendientes de migración',
+            message: 'Aplica la migración 014 para calcular la deuda con turnos reales.',
+          )
+        : Column(
+            children: [
+              for (final summary in _courierFeeSummaries)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 17,
+                        backgroundColor: AppColors.mint,
+                        child: Text(
+                          _courierInitials(summary.courierName),
+                          style: const TextStyle(
+                            color: AppColors.primaryDark,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              summary.courierName,
+                              style: const TextStyle(
+                                color: AppColors.ink,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            Text(
+                              '${summary.scheduledDays} días · ${summary.doubleShiftCount} dobles',
+                              style: const TextStyle(
+                                color: AppColors.muted,
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          Text(
+                            _money(summary.balanceDue),
+                            style: const TextStyle(
+                              color: AppColors.warning,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          Text(
+                            'debe · pagó ${_money(summary.totalPaid)}',
+                            style: const TextStyle(
+                              color: AppColors.muted,
+                              fontSize: 9,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(width: 6),
+                      IconButton(
+                        tooltip: 'Registrar abono',
+                        onPressed: summary.balanceDue <= 0
+                            ? null
+                            : () => _recordFeePayment(summary),
+                        icon: const Icon(Icons.add_card_outlined, size: 19),
+                      ),
+                    ],
+                  ),
+                ),
+              Text(
+                'Semana del ${_adminCalendarDate(_feeWeekStart)} al ${_adminCalendarDate(_feeWeekStart.add(const Duration(days: 6)))} · cuota diaria y recargo doble configurables.',
+                style: const TextStyle(
+                  color: AppColors.muted,
+                  fontSize: 10,
+                  height: 1.35,
+                ),
+              ),
+            ],
+          ),
+  );
 
   Widget _coveragePanel() => _AdminPanel(
     eyebrow: 'COBERTURA',
@@ -4883,7 +8389,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       _AdminPageHeader(
         eyebrow: 'ACCESOS',
         title: 'Usuarios y permisos',
-        subtitle: 'Crea usuarios individuales para vendedores, domiciliarios y administradores.',
+        subtitle: 'Crea una cuenta de farmacia con perfiles vendedores, o accesos de domiciliario y administrador.',
         action: FilledButton.icon(
           onPressed: () => _createOrEditUser(),
           icon: const Icon(Icons.person_add_alt_1_rounded),
@@ -4959,7 +8465,7 @@ class _AdminSidebar extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'FarmaNorte',
+                    farmanorteBrandName,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -5107,12 +8613,15 @@ class _AdminNavButton extends StatelessWidget {
               size: 19,
             ),
             const SizedBox(width: 11),
-            Text(
-              section.label,
-              style: TextStyle(
-                color: selected ? AppColors.primaryDark : AppColors.ink,
-                fontSize: 13,
-                fontWeight: selected ? FontWeight.w900 : FontWeight.w700,
+            Expanded(
+              child: Text(
+                section.label,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: selected ? AppColors.primaryDark : AppColors.ink,
+                  fontSize: 13,
+                  fontWeight: selected ? FontWeight.w900 : FontWeight.w700,
+                ),
               ),
             ),
           ],
@@ -5150,7 +8659,7 @@ class _AdminTopBar extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'FarmaNorte / Administración',
+                    '$farmanorteBrandName / Administración',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
@@ -6064,9 +9573,14 @@ class _AdminWeeklyShiftDialogState extends State<_AdminWeeklyShiftDialog> {
       for (var day = 0; day < draft.days.length; day++) {
         final dayDraft = draft.days[day];
         final zone = suggestedZones[day];
+        final shouldSupport =
+            draft.days.isNotEmpty &&
+            day == ((courierIndex + 2) % draft.days.length);
         final pharmacyOptions = _pharmaciesForZone(zone);
         AdminPharmacy? pharmacy;
-        if (!adminZoneAllowsAnyPharmacy(zone) && pharmacyOptions.isNotEmpty) {
+        if (!shouldSupport &&
+            !adminZoneAllowsAnyPharmacy(zone) &&
+            pharmacyOptions.isNotEmpty) {
           final ordered = [
             for (var offset = 0; offset < pharmacyOptions.length; offset++)
               pharmacyOptions[(courierIndex + day + offset) %
@@ -6085,8 +9599,11 @@ class _AdminWeeklyShiftDialogState extends State<_AdminWeeklyShiftDialog> {
               (pharmacyCounts[pharmacy.code] ?? 0) + 1;
         }
         dayDraft
-          ..zone = zone
-          ..pharmacy = pharmacy?.code ?? adminNoPharmacy
+          ..isSupport = shouldSupport
+          ..zone = shouldSupport ? adminSupportZone : zone
+          ..pharmacy = shouldSupport
+              ? adminNoPharmacy
+              : pharmacy?.code ?? adminNoPharmacy
           ..hours =
               adminPrimaryHours[(courierIndex + day) % adminPrimaryHours.length]
           ..isDouble = false;
@@ -6128,8 +9645,10 @@ class _AdminWeeklyShiftDialogState extends State<_AdminWeeklyShiftDialog> {
           (zone) => zone.name == dayDraft.zone,
         );
         final requiresPharmacy = !adminZoneAllowsAnyPharmacy(dayDraft.zone);
-        if (!zoneExists ||
-            (requiresPharmacy && _pharmacyByCode(dayDraft.pharmacy) == null)) {
+        if (!dayDraft.isSupport &&
+            (!zoneExists ||
+                (requiresPharmacy &&
+                    _pharmacyByCode(dayDraft.pharmacy) == null))) {
           setState(
             () => _error =
                 'Completa la zona y el punto requerido para ${draft.courier.name}.',
@@ -6149,14 +9668,16 @@ class _AdminWeeklyShiftDialogState extends State<_AdminWeeklyShiftDialog> {
             courierId: draft.courier.id,
             courierName: draft.courier.name,
             hours: dayDraft.hours,
-            zone: dayDraft.zone,
-            pharmacy: adminZoneAllowsAnyPharmacy(dayDraft.zone)
+            zone: dayDraft.isSupport ? adminSupportZone : dayDraft.zone,
+            pharmacy:
+                dayDraft.isSupport || adminZoneAllowsAnyPharmacy(dayDraft.zone)
                 ? adminNoPharmacy
                 : pharmacy!.code,
             isDouble: dayDraft.isDouble,
             secondHours: dayDraft.isDouble ? adminDoubleHours : null,
             scheduledFor: _weekStart.add(Duration(days: day)),
             color: AppColors.primaryDark,
+            isSupport: dayDraft.isSupport,
           ),
         );
       }
@@ -6226,10 +9747,58 @@ class _AdminWeeklyShiftDialogState extends State<_AdminWeeklyShiftDialog> {
     );
   }
 
+  Widget _toggleRow({
+    required bool value,
+    required ValueChanged<bool> onChanged,
+    required String title,
+    required String subtitle,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: AppColors.ink,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: AppColors.muted,
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Switch.adaptive(value: value, onChanged: onChanged),
+        ],
+      ),
+    );
+  }
+
   Widget _dayDraft(AdminWeeklyShiftDraft draft, int dayIndex) {
     final dayDraft = draft.days[dayIndex];
     final date = _weekStart.add(Duration(days: dayIndex));
-    final pharmacyOptions = _pharmaciesForZone(dayDraft.zone);
+    final pharmacyOptions = dayDraft.isSupport
+        ? const <AdminPharmacy>[]
+        : _pharmaciesForZone(dayDraft.zone);
     return Container(
       margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.all(10),
@@ -6263,34 +9832,34 @@ class _AdminWeeklyShiftDialogState extends State<_AdminWeeklyShiftDialog> {
             },
           ),
           const SizedBox(height: 8),
-          DropdownButtonFormField<String>(
-            initialValue:
-                _availableZones.any((zone) => zone.name == dayDraft.zone)
-                ? dayDraft.zone
-                : null,
-            isExpanded: true,
-            decoration: const InputDecoration(labelText: 'Zona operativa'),
-            items: [
-              for (final zone in _availableZones)
-                DropdownMenuItem(value: zone.name, child: Text(zone.name)),
-            ],
-            onChanged: (value) {
-              if (value == null) return;
-              final pharmacy = _firstPharmacyForZone(value);
-              setState(() {
-                dayDraft.zone = value;
-                dayDraft.pharmacy = adminZoneAllowsAnyPharmacy(value)
+          _toggleRow(
+            value: dayDraft.isSupport,
+            onChanged: (value) => setState(() {
+              dayDraft.isSupport = value;
+              if (value) {
+                dayDraft.zone = adminSupportZone;
+                dayDraft.pharmacy = adminNoPharmacy;
+              } else {
+                final zone = _availableZones.isEmpty
+                    ? 'Sin zona asignada'
+                    : _availableZones.first.name;
+                final pharmacy = _firstPharmacyForZone(zone);
+                dayDraft.zone = zone;
+                dayDraft.pharmacy = adminZoneAllowsAnyPharmacy(zone)
                     ? adminNoPharmacy
                     : pharmacy?.code ?? adminNoPharmacy;
-              });
-            },
+              }
+            }),
+            title: 'Apoyo general · todas las zonas',
+            subtitle: dayDraft.isSupport
+                ? 'Podrá recibir ofertas de cualquier farmacia durante este turno.'
+                : 'Cubre solamente la zona y el punto configurados abajo.',
           ),
-          const SizedBox(height: 8),
-          if (adminZoneAllowsAnyPharmacy(dayDraft.zone))
+          if (dayDraft.isSupport)
             InputDecorator(
-              decoration: const InputDecoration(labelText: 'Punto base'),
+              decoration: const InputDecoration(labelText: 'Cobertura'),
               child: const Text(
-                'No requerido: cubre cualquier farmacia de la zona.',
+                'Todas las farmacias y zonas · apoyo general',
                 style: TextStyle(
                   color: AppColors.primaryDark,
                   fontSize: 12,
@@ -6298,47 +9867,73 @@ class _AdminWeeklyShiftDialogState extends State<_AdminWeeklyShiftDialog> {
                 ),
               ),
             )
-          else
+          else ...[
             DropdownButtonFormField<String>(
               initialValue:
-                  pharmacyOptions.any(
-                    (pharmacy) => pharmacy.code == dayDraft.pharmacy,
-                  )
-                  ? dayDraft.pharmacy
+                  _availableZones.any((zone) => zone.name == dayDraft.zone)
+                  ? dayDraft.zone
                   : null,
               isExpanded: true,
-              decoration: const InputDecoration(labelText: 'Punto base'),
+              decoration: const InputDecoration(labelText: 'Zona operativa'),
               items: [
-                for (final pharmacy in pharmacyOptions)
-                  DropdownMenuItem(
-                    value: pharmacy.code,
-                    child: Text('${pharmacy.code} · ${pharmacy.name}'),
-                  ),
+                for (final zone in _availableZones)
+                  DropdownMenuItem(value: zone.name, child: Text(zone.name)),
               ],
               onChanged: (value) {
-                if (value != null) {
-                  setState(() => dayDraft.pharmacy = value);
-                }
+                if (value == null) return;
+                final pharmacy = _firstPharmacyForZone(value);
+                setState(() {
+                  dayDraft.zone = value;
+                  dayDraft.pharmacy = adminZoneAllowsAnyPharmacy(value)
+                      ? adminNoPharmacy
+                      : pharmacy?.code ?? adminNoPharmacy;
+                });
               },
             ),
-          SwitchListTile.adaptive(
-            contentPadding: EdgeInsets.zero,
+            const SizedBox(height: 8),
+            if (adminZoneAllowsAnyPharmacy(dayDraft.zone))
+              InputDecorator(
+                decoration: const InputDecoration(labelText: 'Punto base'),
+                child: const Text(
+                  'No requerido: cubre cualquier farmacia de la zona.',
+                  style: TextStyle(
+                    color: AppColors.primaryDark,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              )
+            else
+              DropdownButtonFormField<String>(
+                initialValue:
+                    pharmacyOptions.any(
+                      (pharmacy) => pharmacy.code == dayDraft.pharmacy,
+                    )
+                    ? dayDraft.pharmacy
+                    : null,
+                isExpanded: true,
+                decoration: const InputDecoration(labelText: 'Punto base'),
+                items: [
+                  for (final pharmacy in pharmacyOptions)
+                    DropdownMenuItem(
+                      value: pharmacy.code,
+                      child: Text(formatPharmacyDisplay(pharmacy.code)),
+                    ),
+                ],
+                onChanged: (value) {
+                  if (value != null) {
+                    setState(() => dayDraft.pharmacy = value);
+                  }
+                },
+              ),
+          ],
+          _toggleRow(
             value: dayDraft.isDouble,
             onChanged: (value) => setState(() => dayDraft.isDouble = value),
-            title: const Text(
-              'Doble turno',
-              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
-            ),
-            subtitle: Text(
-              dayDraft.isDouble
-                  ? 'Incluye el bloque adicional de $adminDoubleHours.'
-                  : 'Solo se programa el turno base.',
-              style: const TextStyle(
-                color: AppColors.muted,
-                fontSize: 10.5,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
+            title: 'Doble turno',
+            subtitle: dayDraft.isDouble
+                ? 'Incluye el bloque adicional de $adminDoubleHours.'
+                : 'Solo se programa el turno base.',
           ),
         ],
       ),
@@ -6346,88 +9941,119 @@ class _AdminWeeklyShiftDialogState extends State<_AdminWeeklyShiftDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Programar semana completa'),
-    content: ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 680, maxHeight: 620),
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Se crearán los turnos de lunes a domingo. La sugerencia rota zonas y limita las repeticiones a dos cuando hay alternativas.',
-              style: TextStyle(
-                color: AppColors.muted,
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
+  Widget build(BuildContext context) {
+    final weekLabel =
+        'Semana: ${_adminCalendarDate(_weekStart)} – '
+        '${_adminCalendarDate(_weekStart.add(const Duration(days: 6)))}';
+    final weekButton = OutlinedButton.icon(
+      onPressed: _pickWeek,
+      icon: const Icon(Icons.calendar_month_outlined, size: 17),
+      label: Text(weekLabel, maxLines: 1, overflow: TextOverflow.ellipsis),
+    );
+    final suggestButton = OutlinedButton.icon(
+      onPressed: _suggest,
+      icon: const Icon(Icons.auto_awesome_rounded, size: 17),
+      label: const Text(
+        'Sugerir automáticamente',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
+    final isNarrow = MediaQuery.sizeOf(context).width < 520;
+    final scheduleControls = isNarrow
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [weekButton, const SizedBox(height: 8), suggestButton],
+          )
+        : Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [weekButton, suggestButton],
+          );
+    final dialogActions = isNarrow
+        ? <Widget>[
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                OutlinedButton.icon(
-                  onPressed: _pickWeek,
-                  icon: const Icon(Icons.calendar_month_outlined, size: 17),
-                  label: Text(
-                    'Semana: ${_adminCalendarDate(_weekStart)} – '
-                    '${_adminCalendarDate(_weekStart.add(const Duration(days: 6)))}',
-                  ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Cancelar'),
                 ),
-                OutlinedButton.icon(
-                  onPressed: _suggest,
-                  icon: const Icon(Icons.auto_awesome_rounded, size: 17),
-                  label: const Text('Sugerir automáticamente'),
+                FilledButton(
+                  onPressed: _save,
+                  child: const Text('Guardar semana'),
                 ),
               ],
             ),
-            if (_notice != null) ...[
-              const SizedBox(height: 8),
-              Text(
-                _notice!,
-                style: const TextStyle(
-                  color: AppColors.primaryDark,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ],
-            const SizedBox(height: 14),
-            if (_drafts.isEmpty)
+          ]
+        : <Widget>[
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(onPressed: _save, child: const Text('Guardar semana')),
+          ];
+
+    return AlertDialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+      title: const Text('Programar semana completa'),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 680, maxHeight: 620),
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
               const Text(
-                'No hay domiciliarios activos registrados.',
+                'Se crearán los turnos de lunes a domingo. La sugerencia rota zonas y limita las repeticiones a dos cuando hay alternativas.',
                 style: TextStyle(
-                  color: AppColors.danger,
-                  fontWeight: FontWeight.w700,
-                ),
-              )
-            else
-              for (final draft in _drafts) _courierDraft(draft),
-            if (_error != null) ...[
-              const SizedBox(height: 4),
-              Text(
-                _error!,
-                style: const TextStyle(
-                  color: AppColors.danger,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
+                  color: AppColors.muted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
                 ),
               ),
+              const SizedBox(height: 12),
+              scheduleControls,
+              if (_notice != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  _notice!,
+                  style: const TextStyle(
+                    color: AppColors.primaryDark,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 14),
+              if (_drafts.isEmpty)
+                const Text(
+                  'No hay domiciliarios activos registrados.',
+                  style: TextStyle(
+                    color: AppColors.danger,
+                    fontWeight: FontWeight.w700,
+                  ),
+                )
+              else
+                for (final draft in _drafts) _courierDraft(draft),
+              if (_error != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  _error!,
+                  style: const TextStyle(
+                    color: AppColors.danger,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('Cancelar'),
-      ),
-      FilledButton(onPressed: _save, child: const Text('Guardar semana')),
-    ],
-  );
+      actions: dialogActions,
+    );
+  }
 }
 
 class _AdminShiftRow extends StatelessWidget {
@@ -6526,7 +10152,7 @@ class _AdminPharmacyChip extends StatelessWidget {
         ),
         const SizedBox(width: 6),
         Text(
-          '${pharmacy.code} · ${pharmacy.name.replaceFirst('FarmaNorte ', '')}',
+          formatPharmacyDisplay(pharmacy.code),
           style: const TextStyle(
             color: AppColors.ink,
             fontSize: 10.5,
@@ -6566,7 +10192,7 @@ class _AdminPharmacyRow extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              pharmacy.name,
+              formatPharmacyDisplay(pharmacy.code),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(
@@ -6638,7 +10264,7 @@ class _AdminPharmacyCard extends StatelessWidget {
                   children: [
                     Flexible(
                       child: Text(
-                        pharmacy.name,
+                        formatPharmacyDisplay(pharmacy.code),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -7337,6 +10963,7 @@ class _AdminShiftDialogState extends State<_AdminShiftDialog> {
   late String _hours;
   late String _zone;
   late String _pharmacy;
+  late bool _isSupport;
   late bool _isDouble;
   late DateTime _scheduledFor;
   String? _error;
@@ -7355,8 +10982,11 @@ class _AdminShiftDialogState extends State<_AdminShiftDialog> {
     }
     _selectedCourier ??= widget.couriers.isEmpty ? null : widget.couriers.first;
     _hours = shift?.hours ?? adminPrimaryHours.first;
+    _isSupport = shift?.isSupport ?? false;
     final zoneNames = widget.zones.map((zone) => zone.name).toList();
-    _zone = shift?.zone != null && zoneNames.contains(shift!.zone)
+    _zone = _isSupport
+        ? adminSupportZone
+        : shift?.zone != null && zoneNames.contains(shift!.zone)
         ? shift.zone
         : zoneNames.isEmpty
         ? 'Sin zona asignada'
@@ -7365,10 +10995,11 @@ class _AdminShiftDialogState extends State<_AdminShiftDialog> {
         .where((pharmacy) => pharmacy.zone == _zone)
         .map((pharmacy) => pharmacy.code)
         .toList();
-    _pharmacy =
-        shift?.pharmacy != null &&
-            (shift!.pharmacy == adminNoPharmacy ||
-                pharmacyCodes.contains(shift.pharmacy))
+    _pharmacy = _isSupport
+        ? adminNoPharmacy
+        : shift?.pharmacy != null &&
+              (shift!.pharmacy == adminNoPharmacy ||
+                  pharmacyCodes.contains(shift.pharmacy))
         ? shift.pharmacy
         : adminZoneAllowsAnyPharmacy(_zone)
         ? adminNoPharmacy
@@ -7387,11 +11018,13 @@ class _AdminShiftDialogState extends State<_AdminShiftDialog> {
       setState(() => _error = 'Registra y activa al menos un domiciliario.');
       return;
     }
-    if (_zone == 'Sin zona asignada') {
+    if (!_isSupport && _zone == 'Sin zona asignada') {
       setState(() => _error = 'Selecciona una zona operativa.');
       return;
     }
-    if (!adminZoneAllowsAnyPharmacy(_zone) && _pharmacy == adminNoPharmacy) {
+    if (!_isSupport &&
+        !adminZoneAllowsAnyPharmacy(_zone) &&
+        _pharmacy == adminNoPharmacy) {
       setState(
         () => _error =
             'Agrega una farmacia a esa zona antes de asignar el turno.',
@@ -7404,20 +11037,22 @@ class _AdminShiftDialogState extends State<_AdminShiftDialog> {
         courierId: _selectedCourier!.id,
         courierName: _selectedCourier!.name,
         hours: _hours,
-        zone: _zone,
-        pharmacy: adminZoneAllowsAnyPharmacy(_zone)
+        zone: _isSupport ? adminSupportZone : _zone,
+        pharmacy: _isSupport || adminZoneAllowsAnyPharmacy(_zone)
             ? adminNoPharmacy
             : _pharmacy,
         isDouble: _isDouble,
         secondHours: _isDouble ? adminDoubleHours : null,
         scheduledFor: _scheduledFor,
         color: widget.initial?.color ?? AppColors.primaryDark,
+        isSupport: _isSupport,
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) => AlertDialog(
+    insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
     title: Text(widget.initial == null ? 'Nuevo turno' : 'Editar turno'),
     content: SingleChildScrollView(
       child: Column(
@@ -7475,45 +11110,48 @@ class _AdminShiftDialogState extends State<_AdminShiftDialog> {
             },
           ),
           const SizedBox(height: 12),
-          DropdownButtonFormField<String>(
-            initialValue: _zone,
-            isExpanded: true,
-            decoration: const InputDecoration(labelText: 'Zona asignada'),
-            items: [
-              if (widget.zones.isEmpty)
-                const DropdownMenuItem(
-                  value: 'Sin zona asignada',
-                  child: Text('Sin zona asignada'),
-                ),
-              ...widget.zones.map(
-                (zone) =>
-                    DropdownMenuItem(value: zone.name, child: Text(zone.name)),
+          SwitchListTile.adaptive(
+            value: _isSupport,
+            onChanged: (value) => setState(() {
+              _isSupport = value;
+              if (value) {
+                _zone = adminSupportZone;
+                _pharmacy = adminNoPharmacy;
+              } else {
+                _zone = widget.zones.isEmpty
+                    ? 'Sin zona asignada'
+                    : widget.zones.first.name;
+                final pharmacyOptions = widget.pharmacies
+                    .where((pharmacy) => pharmacy.zone == _zone)
+                    .toList();
+                _pharmacy = adminZoneAllowsAnyPharmacy(_zone)
+                    ? adminNoPharmacy
+                    : pharmacyOptions.isEmpty
+                    ? adminNoPharmacy
+                    : pharmacyOptions.first.code;
+              }
+            }),
+            contentPadding: EdgeInsets.zero,
+            title: const Text(
+              'Apoyo general · todas las zonas',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
+            ),
+            subtitle: Text(
+              _isSupport
+                  ? 'Puede recibir solicitudes de cualquier farmacia.'
+                  : 'Cubre solo la zona y el punto base seleccionados.',
+              style: const TextStyle(
+                color: AppColors.muted,
+                fontSize: 10.5,
+                fontWeight: FontWeight.w600,
               ),
-            ],
-            onChanged: (value) {
-              if (value == null) return;
-              final pharmacyCodes = widget.pharmacies
-                  .where((pharmacy) => pharmacy.zone == value)
-                  .map((pharmacy) => pharmacy.code)
-                  .toList();
-              setState(() {
-                _zone = value;
-                _pharmacy = adminZoneAllowsAnyPharmacy(value)
-                    ? adminNoPharmacy
-                    : pharmacyCodes.isEmpty
-                    ? adminNoPharmacy
-                    : pharmacyCodes.first;
-              });
-            },
+            ),
           ),
-          const SizedBox(height: 12),
-          if (adminZoneAllowsAnyPharmacy(_zone))
+          if (_isSupport)
             InputDecorator(
-              decoration: const InputDecoration(
-                labelText: 'Farmacia específica',
-              ),
+              decoration: const InputDecoration(labelText: 'Cobertura'),
               child: const Text(
-                'No requerida: puede cubrir cualquier farmacia de la zona.',
+                'Todas las farmacias y zonas · apoyo general',
                 style: TextStyle(
                   color: AppColors.primaryDark,
                   fontSize: 12,
@@ -7521,27 +11159,79 @@ class _AdminShiftDialogState extends State<_AdminShiftDialog> {
                 ),
               ),
             )
-          else
+          else ...[
             DropdownButtonFormField<String>(
-              initialValue: _pharmacy,
+              initialValue: _zone,
               isExpanded: true,
-              decoration: const InputDecoration(labelText: 'Farmacia asignada'),
+              decoration: const InputDecoration(labelText: 'Zona asignada'),
               items: [
-                if (_availablePharmacies.isEmpty)
+                if (widget.zones.isEmpty)
                   const DropdownMenuItem(
-                    value: adminNoPharmacy,
-                    child: Text(adminNoPharmacy),
+                    value: 'Sin zona asignada',
+                    child: Text('Sin zona asignada'),
                   ),
-                for (final pharmacy in _availablePharmacies)
-                  DropdownMenuItem(
-                    value: pharmacy.code,
-                    child: Text('${pharmacy.code} · ${pharmacy.name}'),
+                ...widget.zones.map(
+                  (zone) => DropdownMenuItem(
+                    value: zone.name,
+                    child: Text(zone.name),
                   ),
+                ),
               ],
               onChanged: (value) {
-                if (value != null) setState(() => _pharmacy = value);
+                if (value == null) return;
+                final pharmacyCodes = widget.pharmacies
+                    .where((pharmacy) => pharmacy.zone == value)
+                    .map((pharmacy) => pharmacy.code)
+                    .toList();
+                setState(() {
+                  _zone = value;
+                  _pharmacy = adminZoneAllowsAnyPharmacy(value)
+                      ? adminNoPharmacy
+                      : pharmacyCodes.isEmpty
+                      ? adminNoPharmacy
+                      : pharmacyCodes.first;
+                });
               },
             ),
+            const SizedBox(height: 12),
+            if (adminZoneAllowsAnyPharmacy(_zone))
+              InputDecorator(
+                decoration: const InputDecoration(
+                  labelText: 'Farmacia específica',
+                ),
+                child: const Text(
+                  'No requerida: puede cubrir cualquier farmacia de la zona.',
+                  style: TextStyle(
+                    color: AppColors.primaryDark,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              )
+            else
+              DropdownButtonFormField<String>(
+                initialValue: _pharmacy,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: 'Farmacia asignada',
+                ),
+                items: [
+                  if (_availablePharmacies.isEmpty)
+                    const DropdownMenuItem(
+                      value: adminNoPharmacy,
+                      child: Text(adminNoPharmacy),
+                    ),
+                  for (final pharmacy in _availablePharmacies)
+                    DropdownMenuItem(
+                      value: pharmacy.code,
+                      child: Text(formatPharmacyDisplay(pharmacy.code)),
+                    ),
+                ],
+                onChanged: (value) {
+                  if (value != null) setState(() => _pharmacy = value);
+                },
+              ),
+          ],
           const SizedBox(height: 12),
           Align(
             alignment: Alignment.centerLeft,
@@ -7730,7 +11420,8 @@ class _AdminUserCard extends StatelessWidget {
         child: Icon(
           user.role == 'Administrador'
               ? Icons.admin_panel_settings_outlined
-              : user.role == 'Vendedor de farmacia'
+              : user.role == 'Vendedor de farmacia' ||
+                    user.role == 'Cuenta de farmacia'
               ? Icons.storefront_outlined
               : Icons.delivery_dining_rounded,
           color: user.active ? AppColors.primaryDark : AppColors.muted,
@@ -7740,7 +11431,11 @@ class _AdminUserCard extends StatelessWidget {
         user.name,
         style: const TextStyle(fontWeight: FontWeight.w900),
       ),
-      subtitle: Text('${user.role} · ${user.pharmacy}\n${user.username}'),
+      subtitle: Text(
+        user.role == 'Cuenta de farmacia' || user.role == 'Vendedor de farmacia'
+            ? '${user.role} · ${user.pharmacy}\n${user.username} · ${user.pharmacyProfiles.length} perfiles'
+            : '${user.role} · ${user.pharmacy}\n${user.username}${user.phone.trim().isEmpty ? '' : ' · ${user.phone}'}',
+      ),
       isThreeLine: true,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
@@ -7761,6 +11456,200 @@ class _AdminUserCard extends StatelessWidget {
   );
 }
 
+class _AdminPharmacyProfileDraft {
+  _AdminPharmacyProfileDraft({
+    required String displayName,
+    String username = '',
+    this.role = 'vendedor',
+    this.id,
+    this.active = true,
+  }) : name = TextEditingController(text: displayName),
+       username = TextEditingController(text: username);
+
+  factory _AdminPharmacyProfileDraft.fromModel(AdminPharmacyProfile profile) =>
+      _AdminPharmacyProfileDraft(
+        id: profile.id,
+        displayName: profile.displayName,
+        username: profile.username,
+        role: 'vendedor',
+        active: profile.active,
+      );
+
+  final String? id;
+  final TextEditingController name;
+  // Kept for existing records. New profiles no longer ask the administrator
+  // to invent a username; the server generates a unique internal key.
+  final TextEditingController username;
+  String role;
+  bool active;
+
+  void dispose() {
+    name.dispose();
+    username.dispose();
+  }
+}
+
+class _AdminPharmacyProfileEditor extends StatelessWidget {
+  const _AdminPharmacyProfileEditor({
+    super.key,
+    required this.profile,
+    required this.position,
+    required this.onRemove,
+    required this.onChanged,
+  });
+
+  final _AdminPharmacyProfileDraft profile;
+  final int position;
+  final VoidCallback onRemove;
+  final VoidCallback onChanged;
+
+  @override
+  Widget build(BuildContext context) => Card(
+    margin: const EdgeInsets.only(bottom: 8),
+    color: AppColors.canvas,
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Perfil ${position + 1}',
+                  style: const TextStyle(
+                    color: AppColors.primaryDark,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              IconButton(
+                tooltip: profile.id == null
+                    ? 'Quitar perfil'
+                    : 'Desactivar perfil',
+                onPressed: onRemove,
+                icon: Icon(
+                  profile.id == null
+                      ? Icons.remove_circle_outline
+                      : profile.active
+                      ? Icons.person_off_outlined
+                      : Icons.person_add_alt_1_outlined,
+                  color: profile.active
+                      ? AppColors.danger
+                      : AppColors.primaryDark,
+                ),
+              ),
+            ],
+          ),
+          TextField(
+            controller: profile.name,
+            onChanged: (_) => onChanged(),
+            decoration: const InputDecoration(
+              labelText: 'Nombre del vendedor',
+              hintText: 'Ej. Sandy',
+              helperText: 'El sistema crea el usuario interno automáticamente.',
+            ),
+          ),
+          const SizedBox(height: 4),
+          const Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              'Función: vendedor',
+              style: TextStyle(
+                color: AppColors.muted,
+                fontSize: 10.5,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          if (profile.id != null)
+            SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              title: Text(
+                profile.active ? 'Perfil activo' : 'Perfil desactivado',
+              ),
+              value: profile.active,
+              onChanged: (value) {
+                profile.active = value;
+                onChanged();
+              },
+            ),
+        ],
+      ),
+    ),
+  );
+}
+
+class _AdminAccountChoiceCard extends StatelessWidget {
+  const _AdminAccountChoiceCard({
+    required this.icon,
+    required this.title,
+    required this.description,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String description;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => Material(
+    color: Colors.transparent,
+    child: InkWell(
+      borderRadius: BorderRadius.circular(14),
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        constraints: const BoxConstraints(minHeight: 92),
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: selected ? AppColors.mint : Colors.white,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: selected ? AppColors.primary : AppColors.line,
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(
+              icon,
+              size: 21,
+              color: selected ? AppColors.primaryDark : AppColors.muted,
+            ),
+            const SizedBox(height: 7),
+            Text(
+              title,
+              style: const TextStyle(
+                color: AppColors.ink,
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              description,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                color: AppColors.muted,
+                fontSize: 9.5,
+                height: 1.2,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 class _AdminUserDialog extends StatefulWidget {
   const _AdminUserDialog({required this.initial, required this.pharmacies});
 
@@ -7773,21 +11662,28 @@ class _AdminUserDialog extends StatefulWidget {
 
 class _AdminUserDialogState extends State<_AdminUserDialog> {
   late final TextEditingController _name;
+  late final TextEditingController _phone;
   late final TextEditingController _username;
   late final TextEditingController _password;
-  late String _role;
+  String? _role;
   late String _pharmacy;
   late bool _active;
+  int _profileCount = 1;
+  final List<_AdminPharmacyProfileDraft> _pharmacyProfiles = [];
   String? _error;
+
+  bool get _isNew => widget.initial == null;
+  bool get _isPharmacy => _role == 'Cuenta de farmacia';
 
   @override
   void initState() {
     super.initState();
     final user = widget.initial;
     _name = TextEditingController(text: user?.name ?? '');
+    _phone = TextEditingController(text: user?.phone ?? '');
     _username = TextEditingController(text: user?.username ?? '');
     _password = TextEditingController();
-    _role = user?.role ?? 'Domiciliario';
+    _role = _roleForUser(user);
     final knownPharmacies = {
       'Sin farmacia asignada',
       ...widget.pharmacies.map((pharmacy) => pharmacy.code),
@@ -7796,160 +11692,484 @@ class _AdminUserDialogState extends State<_AdminUserDialog> {
         ? user!.pharmacy
         : 'Sin farmacia asignada';
     _active = user?.active ?? true;
+    for (final profile
+        in user?.pharmacyProfiles ?? const <AdminPharmacyProfile>[]) {
+      _pharmacyProfiles.add(_AdminPharmacyProfileDraft.fromModel(profile));
+    }
+    _profileCount = _pharmacyProfiles.isEmpty ? 1 : _pharmacyProfiles.length;
+  }
+
+  String? _roleForUser(AdminUser? user) {
+    if (user == null) return null;
+    if (user.role == 'Administrador') return 'Administrador';
+    if (user.role == 'Cuenta de farmacia' ||
+        user.role == 'Vendedor de farmacia') {
+      return 'Cuenta de farmacia';
+    }
+    return 'Domiciliario';
   }
 
   @override
   void dispose() {
     _name.dispose();
+    _phone.dispose();
     _username.dispose();
     _password.dispose();
+    for (final profile in _pharmacyProfiles) {
+      profile.dispose();
+    }
     super.dispose();
   }
 
+  void _suggestPharmacyAccount(String code) {
+    if (code == 'Sin farmacia asignada') return;
+    final pharmacy = widget.pharmacies.cast<AdminPharmacy?>().firstWhere(
+      (item) => item?.code == code,
+      orElse: () => null,
+    );
+    if (pharmacy == null) return;
+    if (_isNew || _name.text.trim().isEmpty) {
+      _name.text = formatPharmacyDisplay(pharmacy.code);
+    }
+    if (_isNew && _username.text.trim().isEmpty) {
+      _username.text = 'farmanorte.fm${pharmacy.code}';
+    }
+    if (_isNew && _password.text.isEmpty) {
+      _password.text = 'FarmaNorte${pharmacy.code}';
+    }
+    if (_pharmacyProfiles.isEmpty) _addProfileWithoutSetState();
+  }
+
+  void _selectRole(String role) {
+    setState(() {
+      _role = role;
+      _error = null;
+      if (role == 'Cuenta de farmacia' && _pharmacyProfiles.isEmpty) {
+        _addProfileWithoutSetState();
+      }
+      if (role == 'Cuenta de farmacia') _suggestPharmacyAccount(_pharmacy);
+    });
+  }
+
+  void _addProfileWithoutSetState() {
+    final number = _pharmacyProfiles.length + 1;
+    _pharmacyProfiles.add(
+      _AdminPharmacyProfileDraft(displayName: 'Perfil $number'),
+    );
+    _profileCount = _pharmacyProfiles.length;
+  }
+
+  void _setProfileCount(int value) {
+    setState(() {
+      _profileCount = value;
+      while (_pharmacyProfiles.length < value) {
+        _addProfileWithoutSetState();
+      }
+      while (_pharmacyProfiles.length > value) {
+        final last = _pharmacyProfiles.removeLast();
+        if (last.id == null) last.dispose();
+      }
+    });
+  }
+
+  void _addPharmacyProfile() {
+    setState(_addProfileWithoutSetState);
+  }
+
+  void _removePharmacyProfile(int index) {
+    final profile = _pharmacyProfiles[index];
+    if (profile.id != null && profile.id!.isNotEmpty) {
+      setState(() => profile.active = false);
+      return;
+    }
+    if (_pharmacyProfiles.length == 1) {
+      setState(() => _error = 'Debe quedar al menos un perfil vendedor.');
+      return;
+    }
+    setState(() {
+      profile.dispose();
+      _pharmacyProfiles.removeAt(index);
+      _profileCount = _pharmacyProfiles.length;
+    });
+  }
+
+  String _pharmacyAccountName() {
+    if (_pharmacy != 'Sin farmacia asignada') {
+      final pharmacy = widget.pharmacies.cast<AdminPharmacy?>().firstWhere(
+        (item) => item?.code == _pharmacy,
+        orElse: () => null,
+      );
+      if (pharmacy != null) return formatPharmacyDisplay(pharmacy.code);
+    }
+    return _name.text.trim();
+  }
+
   void _save() {
-    final name = _name.text.trim();
+    final isPharmacy = _isPharmacy;
+    final name = isPharmacy ? _pharmacyAccountName() : _name.text.trim();
+    final phone = _phone.text.trim();
     final username = _username.text.trim().toLowerCase();
     final password = _password.text;
+    if (_role == null) {
+      setState(() => _error = 'Selecciona el tipo de cuenta.');
+      return;
+    }
     if (name.isEmpty || username.isEmpty) {
       setState(() => _error = 'Completa nombre y usuario.');
+      return;
+    }
+    if (!isPharmacy && phone.isEmpty) {
+      setState(() => _error = 'Escribe el número de teléfono.');
+      return;
+    }
+    final normalizedPhone = phone.replaceAll(RegExp(r'\D'), '');
+    if (!isPharmacy && !RegExp(r'^3\d{9}$').hasMatch(normalizedPhone)) {
+      setState(
+        () => _error =
+            'El teléfono debe empezar por 3 y tener exactamente 10 números.',
+      );
+      return;
+    }
+    if (_isNew && password.isEmpty) {
+      setState(() => _error = 'Define una contraseña inicial.');
       return;
     }
     if (password.isNotEmpty && password.length < 8) {
       setState(() => _error = 'La contraseña debe tener mínimo 8 caracteres.');
       return;
     }
-    if (_role == 'Vendedor de farmacia' &&
-        _pharmacy == 'Sin farmacia asignada') {
-      setState(() => _error = 'Selecciona la farmacia del vendedor.');
+    if (isPharmacy && _pharmacy == 'Sin farmacia asignada') {
+      setState(() => _error = 'Selecciona una de las farmacias reales.');
       return;
     }
+    if (isPharmacy && _pharmacyProfiles.isEmpty) {
+      setState(() => _error = 'Agrega al menos un perfil vendedor.');
+      return;
+    }
+
+    final profiles = <AdminPharmacyProfile>[];
+    for (final profile in _pharmacyProfiles) {
+      final profileName = profile.name.text.trim();
+      if (isPharmacy && profileName.isEmpty) {
+        setState(() => _error = 'Completa el nombre de cada vendedor.');
+        return;
+      }
+      profiles.add(
+        AdminPharmacyProfile(
+          id: profile.id,
+          displayName: profileName,
+          // Existing rows keep their internal key. New rows receive one from
+          // the Edge Function, so duplicate names can never block creation.
+          username: profile.id == null ? '' : profile.username.text.trim(),
+          role: 'vendedor',
+          active: profile.active,
+        ),
+      );
+    }
+
     Navigator.pop(
       context,
       AdminUser(
         id: widget.initial?.id,
         name: name,
+        phone: normalizedPhone,
         username: username,
-        role: _role,
-        pharmacy: _pharmacy,
+        role: _role!,
+        pharmacy: isPharmacy ? _pharmacy : 'Sin farmacia asignada',
         active: _active,
         temporaryPassword: password.isEmpty ? null : password,
+        pharmacyProfiles: profiles,
       ),
     );
   }
 
+  Widget _roleCard({
+    required String role,
+    required IconData icon,
+    required String title,
+    required String description,
+  }) => _AdminAccountChoiceCard(
+    icon: icon,
+    title: title,
+    description: description,
+    selected: _role == role,
+    onTap: () => _selectRole(role),
+  );
+
+  Widget _buildRolePicker() {
+    if (!_isNew) {
+      return InputDecorator(
+        decoration: const InputDecoration(labelText: 'Tipo de cuenta'),
+        child: Text(
+          _role == 'Cuenta de farmacia'
+              ? 'Farmacia · cuenta con perfiles vendedores'
+              : _role ?? 'Sin tipo',
+          style: const TextStyle(fontWeight: FontWeight.w800),
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          '¿Qué cuenta vas a crear?',
+          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w900),
+        ),
+        const SizedBox(height: 8),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final width = (constraints.maxWidth - 16) / 3;
+            return Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                SizedBox(
+                  width: width,
+                  child: _roleCard(
+                    role: 'Administrador',
+                    icon: Icons.admin_panel_settings_outlined,
+                    title: 'Administrador',
+                    description: 'Acceso total',
+                  ),
+                ),
+                SizedBox(
+                  width: width,
+                  child: _roleCard(
+                    role: 'Domiciliario',
+                    icon: Icons.delivery_dining_rounded,
+                    title: 'Domiciliario',
+                    description: 'Nombre y acceso',
+                  ),
+                ),
+                SizedBox(
+                  width: width,
+                  child: _roleCard(
+                    role: 'Cuenta de farmacia',
+                    icon: Icons.local_pharmacy_outlined,
+                    title: 'Farmacia',
+                    description: 'Cuenta + vendedores',
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCommonAccessFields() => Column(
+    children: [
+      TextField(
+        controller: _username,
+        keyboardType: TextInputType.text,
+        readOnly: widget.initial != null,
+        decoration: const InputDecoration(
+          labelText: 'Usuario de acceso',
+          hintText: 'Ej. farmanorte.fm357',
+          helperText: 'No necesitas usar un correo personal.',
+        ),
+      ),
+      const SizedBox(height: 12),
+      TextField(
+        controller: _password,
+        obscureText: true,
+        decoration: InputDecoration(
+          labelText: widget.initial == null
+              ? 'Contraseña inicial'
+              : 'Nueva contraseña temporal (opcional)',
+          helperText: widget.initial == null
+              ? 'Mínimo 8 caracteres.'
+              : 'Déjala vacía para conservar la actual.',
+        ),
+      ),
+    ],
+  );
+
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: Text(widget.initial == null ? 'Nuevo usuario' : 'Editar usuario'),
-    content: SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: _name,
-            autofocus: true,
-            decoration: const InputDecoration(labelText: 'Nombre completo'),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _username,
-            keyboardType: TextInputType.text,
-            readOnly: widget.initial != null,
-            decoration: const InputDecoration(
-              labelText: 'Usuario',
-              hintText: 'Ej. juan.perez',
-              helperText: 'No necesita correo personal.',
-            ),
-          ),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _password,
-            obscureText: true,
-            decoration: InputDecoration(
-              labelText: widget.initial == null
-                  ? 'Contraseña inicial'
-                  : 'Nueva contraseña temporal (opcional)',
-              helperText: widget.initial == null
-                  ? 'Mínimo 8 caracteres. Entrégala de forma segura.'
-                  : 'Déjala vacía para conservar la actual. Mínimo 8 caracteres.',
-            ),
-          ),
-          const SizedBox(height: 12),
-          DropdownButtonFormField<String>(
-            initialValue: _role,
-            isExpanded: true,
-            decoration: const InputDecoration(labelText: 'Rol'),
-            items: const [
-              DropdownMenuItem(
-                value: 'Domiciliario',
-                child: Text('Domiciliario'),
-              ),
-              DropdownMenuItem(
-                value: 'Vendedor de farmacia',
-                child: Text('Vendedor de farmacia'),
-              ),
-              DropdownMenuItem(
-                value: 'Administrador',
-                child: Text('Administrador'),
-              ),
+    content: SizedBox(
+      width: (MediaQuery.sizeOf(context).width - 48)
+          .clamp(280.0, 520.0)
+          .toDouble(),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildRolePicker(),
+            if (_role != null) ...[
+              if (_isNew) ...[
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: () => setState(() => _role = null),
+                    icon: const Icon(Icons.swap_horiz_rounded, size: 17),
+                    label: const Text('Cambiar tipo'),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 4),
+              if (_isPharmacy) ...[
+                DropdownButtonFormField<String>(
+                  initialValue: _pharmacy,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Farmacia real',
+                    helperText: 'Selecciona una de las farmacias cargadas.',
+                  ),
+                  items: [
+                    const DropdownMenuItem(
+                      value: 'Sin farmacia asignada',
+                      child: Text('Selecciona una farmacia'),
+                    ),
+                    ...widget.pharmacies.map(
+                      (pharmacy) => DropdownMenuItem(
+                        value: pharmacy.code,
+                        child: Text(
+                          '${formatPharmacyDisplay(pharmacy.code)} · ${pharmacy.zone}',
+                        ),
+                      ),
+                    ),
+                  ],
+                  onChanged: widget.initial != null
+                      ? null
+                      : (value) {
+                          if (value == null) return;
+                          setState(() {
+                            _pharmacy = value;
+                            _suggestPharmacyAccount(value);
+                          });
+                        },
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _name,
+                  readOnly: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Nombre de la cuenta',
+                    helperText: 'Se toma del código de la farmacia.',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _buildCommonAccessFields(),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    const Expanded(
+                      child: Text(
+                        'Perfiles vendedores',
+                        style: TextStyle(fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                    if (!_isNew)
+                      TextButton.icon(
+                        onPressed: _addPharmacyProfile,
+                        icon: const Icon(Icons.person_add_alt_1, size: 16),
+                        label: const Text('Agregar'),
+                      ),
+                  ],
+                ),
+                if (_isNew)
+                  DropdownButtonFormField<int>(
+                    initialValue: _profileCount,
+                    decoration: const InputDecoration(
+                      labelText: 'Cantidad de perfiles',
+                      helperText: 'Todos tendrán función de vendedor.',
+                    ),
+                    items: [
+                      for (var count = 1; count <= 10; count++)
+                        DropdownMenuItem(
+                          value: count,
+                          child: Text(
+                            '$count ${count == 1 ? 'perfil' : 'perfiles'}',
+                          ),
+                        ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) _setProfileCount(value);
+                    },
+                  )
+                else
+                  const Text(
+                    'Cambia el nombre o desactiva un perfil para conservar su historial.',
+                    style: TextStyle(
+                      color: AppColors.muted,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                const SizedBox(height: 8),
+                ..._pharmacyProfiles.asMap().entries.map(
+                  (entry) => _AdminPharmacyProfileEditor(
+                    key: ObjectKey(entry.value),
+                    position: entry.key,
+                    profile: entry.value,
+                    onRemove: () => _removePharmacyProfile(entry.key),
+                    onChanged: () => setState(() {}),
+                  ),
+                ),
+              ] else ...[
+                TextField(
+                  controller: _name,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Nombre completo',
+                    hintText: 'Ej. Leonardo Acosta',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: _phone,
+                  keyboardType: TextInputType.phone,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                  maxLength: 10,
+                  decoration: const InputDecoration(
+                    labelText: 'Teléfono',
+                    hintText: 'Ej. 3001234567',
+                    helperText: 'Empieza por 3 y usa 10 números.',
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _buildCommonAccessFields(),
+              ],
+              if (widget.initial != null) ...[
+                const SizedBox(height: 12),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Usuario activo'),
+                  subtitle: Text(
+                    _active ? 'Puede iniciar sesión.' : 'No puede iniciar sesión, pero se conserva su historial.',
+                  ),
+                  value: _active,
+                  onChanged: (value) => setState(() => _active = value),
+                ),
+              ],
             ],
-            onChanged: (value) {
-              if (value != null) setState(() => _role = value);
-            },
-          ),
-          const SizedBox(height: 12),
-          DropdownButtonFormField<String>(
-            initialValue: _pharmacy,
-            isExpanded: true,
-            decoration: const InputDecoration(
-              labelText: 'Farmacia asignada',
-              helperText:
-                  'El domiciliario se vincula a farmacia desde el turno.',
-            ),
-            items: [
-              const DropdownMenuItem(
-                value: 'Sin farmacia asignada',
-                child: Text('Sin farmacia asignada'),
-              ),
-              ...widget.pharmacies.map(
-                (pharmacy) => DropdownMenuItem(
-                  value: pharmacy.code,
-                  child: Text('FN ${pharmacy.code} · ${pharmacy.zone}'),
+            if (_error != null) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: AppColors.danger.withAlpha(18),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  _error!,
+                  style: const TextStyle(
+                    color: AppColors.danger,
+                    fontSize: 11,
+                    height: 1.3,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
             ],
-            onChanged: (value) {
-              if (value != null) setState(() => _pharmacy = value);
-            },
-          ),
-          if (widget.initial != null) ...[
-            const SizedBox(height: 12),
-            SwitchListTile.adaptive(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Usuario activo'),
-              subtitle: Text(
-                _active
-                    ? 'Puede iniciar sesión.'
-                    : 'No puede iniciar sesión, pero se conserva su historial.',
-              ),
-              value: _active,
-              onChanged: (value) => setState(() => _active = value),
-            ),
           ],
-          if (_error != null) ...[
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerLeft,
-              child: Text(
-                _error!,
-                style: const TextStyle(
-                  color: AppColors.danger,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
-          ],
-        ],
+        ),
       ),
     ),
     actions: [
@@ -7957,7 +12177,12 @@ class _AdminUserDialogState extends State<_AdminUserDialog> {
         onPressed: () => Navigator.pop(context),
         child: const Text('Cancelar'),
       ),
-      FilledButton(onPressed: _save, child: const Text('Guardar usuario')),
+      FilledButton(
+        onPressed: _role == null ? null : _save,
+        child: Text(
+          widget.initial == null ? 'Crear usuario' : 'Guardar cambios',
+        ),
+      ),
     ],
   );
 }
@@ -7971,21 +12196,32 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<Delivery> _deliveries = SupabaseConfig.isConfigured
       ? <Delivery>[]
       : StageZeroDemoStore.instance.deliveries.value.toList();
   StreamSubscription<List<Delivery>>? _remoteDeliveriesSubscription;
+  final Map<String, DeliveryStatus> _remoteDeliveryStatuses = {};
+  final Map<String, String?> _remoteAcceptedCouriers = {};
+  final Map<String, String> _equivalentStatuses = {};
+  bool _remoteDeliveryBaselineReady = false;
   bool _connected = true;
+  bool _appInBackground = false;
   bool _autoAccepting = false;
+  Timer? _presenceHeartbeat;
   List<AdminShift> _courierShifts = const [];
   DateTime _courierWeekStart = adminPublishWeekStart(_adminToday());
   bool _loadingCourierShifts = false;
   String? _courierShiftError;
+  CourierFeeSummary? _feeSummary;
+  bool _loadingFeeSummary = false;
+  List<CourierPharmacyBreakdown> _courierPharmacyBreakdown = const [];
+  bool _loadingCourierBreakdown = false;
+  String? _courierPharmacyBreakdownError;
 
   String get _courierName {
     final name = widget.profile?.fullName.trim() ?? '';
-    return name.isEmpty ? 'Juan Sebastián Ríos' : name;
+    return name.isEmpty ? 'Domiciliario' : name;
   }
 
   String get _courierId {
@@ -8009,7 +12245,16 @@ class _HomeScreenState extends State<HomeScreen> {
     return courierBasePharmacyCode.isEmpty ? null : courierBasePharmacyCode;
   }
 
+  bool get _hasGlobalSupportShiftToday => _courierShifts.any(
+    (shift) =>
+        DateUtils.isSameDay(shift.scheduledFor, _adminToday()) &&
+        shift.isSupport,
+  );
+
   String get _baseLabel {
+    if (_hasGlobalSupportShiftToday && _basePharmacyCode == null) {
+      return 'Apoyo general · toda la red';
+    }
     final code = _basePharmacyCode;
     return code == null ? 'Punto base pendiente de asignación' : 'FN $code';
   }
@@ -8017,32 +12262,95 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(AppNotificationAudio.initialize());
+    AppNotificationNavigation.pending.addListener(_onPendingNotification);
     StageZeroDemoStore.instance.deliveries.addListener(
       _onLocalDeliveriesChanged,
     );
     unawaited(_connectToOperations());
+    unawaited(_consumePendingNotification());
+    unawaited(_loadCourierEquivalentStatuses());
+    unawaited(_loadCourierPharmacyBreakdown());
     unawaited(_loadCourierShifts());
-    unawaited(
-      OperationsBackend.instance.publishCourierConnection(
-        courierId: _courierId,
-        connected: true,
-      ),
-    );
+    _publishPresence(true);
+    _presenceHeartbeat = Timer.periodic(const Duration(seconds: 45), (_) {
+      if (!mounted) return;
+      _publishPresence(_connected && !_appInBackground);
+    });
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    AppNotificationNavigation.pending.removeListener(_onPendingNotification);
     StageZeroDemoStore.instance.deliveries.removeListener(
       _onLocalDeliveriesChanged,
     );
     unawaited(_remoteDeliveriesSubscription?.cancel());
+    _presenceHeartbeat?.cancel();
+    _publishPresence(false);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final isBackground =
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.detached;
+    if (_appInBackground == isBackground) return;
+    if (mounted) setState(() => _appInBackground = isBackground);
+    // The push token continues working while the app is in the background;
+    // the presence row is marked paused so the pharmacy sees the real state.
+    _publishPresence(!isBackground && _connected);
+    if (!isBackground && _autoAccepting) {
+      unawaited(_autoAcceptBaseOffers());
+    }
+  }
+
+  void _publishPresence(bool connected) {
     unawaited(
       OperationsBackend.instance.publishCourierConnection(
         courierId: _courierId,
-        connected: false,
+        connected: connected,
       ),
     );
-    super.dispose();
+  }
+
+  void _onPendingNotification() {
+    unawaited(_consumePendingNotification());
+  }
+
+  Future<void> _consumePendingNotification() async {
+    if (!mounted) return;
+    final action = AppNotificationNavigation.pending.value;
+    if (action == null) return;
+    final delivery = _deliveries.cast<Delivery?>().firstWhere(
+      (item) => item?.id == action.deliveryId,
+      orElse: () => null,
+    );
+    if (delivery == null) {
+      // Si la lista real ya cargó y el domicilio no está, otro domiciliario
+      // lo tomó o ya no está disponible: se informa en vez de esperar siempre.
+      if (_remoteDeliveryBaselineReady) {
+        AppNotificationNavigation.pending.value = null;
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            const SnackBar(
+              content: Text('Ese domicilio ya no está disponible para ti.'),
+            ),
+          );
+      }
+      return;
+    }
+    AppNotificationNavigation.pending.value = null;
+    if (action.openChat) {
+      _openDeliveryChat(delivery);
+    } else {
+      await _openDeliveryDetail(delivery);
+    }
   }
 
   void _onLocalDeliveriesChanged() {
@@ -8061,7 +12369,82 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted || stream == null) return;
     _remoteDeliveriesSubscription = stream.listen((remoteDeliveries) {
       if (!mounted) return;
+      final newOffers = _remoteDeliveryBaselineReady
+          ? remoteDeliveries.where((delivery) {
+              final previousStatus = _remoteDeliveryStatuses[delivery.id];
+              return delivery.status == DeliveryStatus.offered &&
+                  previousStatus != DeliveryStatus.offered;
+            }).toList()
+          : const <Delivery>[];
+      final newAssignments = _remoteDeliveryBaselineReady
+          ? remoteDeliveries.where((delivery) {
+              final previousStatus = _remoteDeliveryStatuses[delivery.id];
+              final previousCourier = _remoteAcceptedCouriers[delivery.id];
+              return delivery.status == DeliveryStatus.accepted &&
+                  delivery.acceptedCourierId == _courierId &&
+                  (previousStatus != DeliveryStatus.accepted ||
+                      previousCourier != _courierId);
+            }).toList()
+          : const <Delivery>[];
+      _remoteDeliveryStatuses
+        ..clear()
+        ..addEntries(
+          remoteDeliveries.map(
+            (delivery) => MapEntry(delivery.id, delivery.status),
+          ),
+        );
+      _remoteAcceptedCouriers
+        ..clear()
+        ..addEntries(
+          remoteDeliveries.map(
+            (delivery) => MapEntry(delivery.id, delivery.acceptedCourierId),
+          ),
+        );
+      _remoteDeliveryBaselineReady = true;
       setState(() => _deliveries = remoteDeliveries);
+      unawaited(_consumePendingNotification());
+      unawaited(_loadCourierEquivalentStatuses());
+      unawaited(_loadCourierPharmacyBreakdown());
+      if (newOffers.isNotEmpty) {
+        unawaited(
+          AppNotificationAudio.playDeliveryAlertFor(
+            newOffers.map((delivery) => delivery.id),
+            assigned: false,
+          ),
+        );
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(
+                newOffers.length == 1
+                    ? 'Nuevo domicilio disponible.'
+                    : '${newOffers.length} domicilios nuevos disponibles.',
+              ),
+              duration: const Duration(seconds: 4),
+            ),
+          );
+      }
+      if (newAssignments.isNotEmpty) {
+        unawaited(
+          AppNotificationAudio.playDeliveryAlertFor(
+            newAssignments.map((delivery) => delivery.id),
+            assigned: true,
+          ),
+        );
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(
+                newAssignments.length == 1
+                    ? 'La farmacia te asignó un domicilio.'
+                    : 'La farmacia te asignó ${newAssignments.length} domicilios.',
+              ),
+              duration: const Duration(seconds: 4),
+            ),
+          );
+      }
       if (_autoAccepting) unawaited(_autoAcceptBaseOffers());
     });
   }
@@ -8093,6 +12476,7 @@ class _HomeScreenState extends State<HomeScreen> {
       }
       if (!mounted) return;
       setState(() => _courierShifts = shifts);
+      unawaited(_loadCourierFeeSummary());
     } catch (error) {
       if (!mounted) return;
       setState(
@@ -8100,6 +12484,71 @@ class _HomeScreenState extends State<HomeScreen> {
       );
     } finally {
       if (mounted) setState(() => _loadingCourierShifts = false);
+    }
+  }
+
+  Future<void> _loadCourierFeeSummary() async {
+    if (!SupabaseConfig.isConfigured || !mounted) return;
+    setState(() => _loadingFeeSummary = true);
+    try {
+      final summary = await OperationsBackend.instance.loadCourierFeeSummary(
+        weekStart: _courierWeekStart,
+      );
+      if (mounted) setState(() => _feeSummary = summary);
+    } catch (_) {
+      if (mounted) setState(() => _feeSummary = null);
+    } finally {
+      if (mounted) setState(() => _loadingFeeSummary = false);
+    }
+  }
+
+  Future<void> _loadCourierEquivalentStatuses() async {
+    if (!SupabaseConfig.isConfigured || !mounted) return;
+    try {
+      final statuses = await OperationsBackend.instance
+          .loadCourierEquivalentStatuses();
+      if (!mounted) return;
+      setState(() {
+        _equivalentStatuses
+          ..clear()
+          ..addAll(statuses);
+      });
+    } catch (_) {
+      // La operación continúa; si no se pudo consultar, el equivalente no se
+      // considera liberado y no se suma a las ganancias.
+    }
+  }
+
+  Future<void> _loadCourierPharmacyBreakdown() async {
+    if (!mounted) return;
+    setState(() {
+      _loadingCourierBreakdown = true;
+      _courierPharmacyBreakdownError = null;
+    });
+    try {
+      final breakdown = await OperationsBackend.instance
+          .loadCourierPharmacyBreakdown();
+      if (mounted) {
+        setState(() {
+          _courierPharmacyBreakdown = breakdown;
+          _courierPharmacyBreakdownError = null;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _courierPharmacyBreakdown = const [];
+          _courierPharmacyBreakdownError = error
+              .toString()
+              .replaceFirst('PostgrestException(message: ', '')
+              .split(', code:')
+              .first
+              .replaceFirst('Exception: ', '')
+              .trim();
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _loadingCourierBreakdown = false);
     }
   }
 
@@ -8121,9 +12570,42 @@ class _HomeScreenState extends State<HomeScreen> {
       )
       .toList();
 
-  double get _earnings => _deliveries
-      .where((item) => item.status == DeliveryStatus.delivered)
+  bool _equivalentReleased(Delivery item) =>
+      _equivalentStatuses[item.id] == 'signed' ||
+      _equivalentStatuses[item.id] == 'acknowledged';
+
+  List<Delivery> get _completedDeliveries => _deliveries
+      .where(
+        (item) =>
+            item.status == DeliveryStatus.delivered ||
+            item.status == DeliveryStatus.notDelivered,
+      )
+      .toList();
+
+  int get _pendingEquivalentCount =>
+      _completedDeliveries.where((item) => !_equivalentReleased(item)).length;
+
+  double get _pendingEquivalentAmount => _completedDeliveries
+      .where((item) => !_equivalentReleased(item))
       .fold(0.0, (total, item) => total + item.serviceFee);
+
+  double get _earnings => _deliveries
+      .where(
+        (item) =>
+            item.status == DeliveryStatus.delivered &&
+            _equivalentReleased(item),
+      )
+      .fold(0.0, (total, item) => total + item.serviceFee);
+
+  Future<void> _openDeliveryDetail(Delivery item) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) =>
+            DeliveryDetailScreen(delivery: item, onChanged: _replace),
+      ),
+    );
+    await _loadCourierEquivalentStatuses();
+  }
 
   void _replace(Delivery item) {
     final index = _deliveries.indexWhere((delivery) => delivery.id == item.id);
@@ -8132,12 +12614,6 @@ class _HomeScreenState extends State<HomeScreen> {
         StageZeroDemoStore.instance.updateDelivery(item);
       }
       setState(() => _deliveries[index] = item);
-      unawaited(
-        OperationsBackend.instance.updateDeliveryStatus(
-          deliveryId: item.id,
-          status: item.status,
-        ),
-      );
     }
   }
 
@@ -8146,12 +12622,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _connected = connected;
       if (!connected) _autoAccepting = false;
     });
-    unawaited(
-      OperationsBackend.instance.publishCourierConnection(
-        courierId: _courierId,
-        connected: connected,
-      ),
-    );
+    _publishPresence(connected && !_appInBackground);
   }
 
   void _setAutoAccepting(bool enabled) {
@@ -8160,7 +12631,8 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
     final baseCode = _basePharmacyCode;
-    if (baseCode == null) {
+    final globalSupport = _hasGlobalSupportShiftToday;
+    if (baseCode == null && !globalSupport) {
       setState(() => _autoAccepting = false);
       ScaffoldMessenger.of(context)
         ..hideCurrentSnackBar()
@@ -8183,7 +12655,9 @@ class _HomeScreenState extends State<HomeScreen> {
       ..showSnackBar(
         SnackBar(
           content: Text(
-            'Autoaceptado activo solo para $baseCode. Los demás domicilios se aceptan manualmente.',
+            globalSupport
+                ? 'Autoaceptado activo para todas las zonas como apoyo general.'
+                : 'Autoaceptado activo solo para $baseCode. Los demás domicilios se aceptan manualmente.',
           ),
         ),
       );
@@ -8191,20 +12665,31 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _autoAcceptBaseOffers() async {
     final baseCode = _basePharmacyCode;
-    if (baseCode == null || !_connected) return;
+    final globalSupport = _hasGlobalSupportShiftToday;
+    if ((baseCode == null && !globalSupport) || !_connected) return;
     final baseOffers = _deliveries
         .where(
           (item) =>
               item.status == DeliveryStatus.offered &&
               !item.approvalPending &&
-              item.pharmacyCode == baseCode,
+              (globalSupport || item.pharmacyCode == baseCode),
         )
         .toList();
     for (final item in baseOffers) {
       if (SupabaseConfig.isConfigured) {
-        final accepted = await OperationsBackend.instance.acceptDelivery(
-          deliveryId: item.id,
-        );
+        bool accepted = false;
+        try {
+          accepted = await OperationsBackend.instance.acceptDelivery(
+            deliveryId: item.id,
+            asSupport:
+                globalSupport &&
+                (baseCode == null || item.pharmacyCode != baseCode),
+          );
+        } catch (_) {
+          // Otro cambio en tiempo real puede haber cerrado la oferta. El resto
+          // de los domicilios debe seguir procesándose sin romper el flujo.
+          continue;
+        }
         if (!accepted || !mounted) continue;
       } else {
         StageZeroDemoStore.instance.updateDelivery(
@@ -8238,19 +12723,15 @@ class _HomeScreenState extends State<HomeScreen> {
     }
     if (item.status != DeliveryStatus.offered) return;
 
+    // En producción cada domicilio es una operación independiente: el mismo
+    // domiciliario puede aceptar varios pedidos distintos. La aprobación
+    // adicional se conserva únicamente para el modo de demostración antiguo.
+    if (SupabaseConfig.isConfigured) {
+      unawaited(_acceptRealDelivery(item));
+      return;
+    }
+
     if (_active.isNotEmpty) {
-      if (SupabaseConfig.isConfigured) {
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(
-            const SnackBar(
-              content: Text(
-                'La aprobación de un segundo domicilio aún no está habilitada en el backend real.',
-              ),
-            ),
-          );
-        return;
-      }
       StageZeroDemoStore.instance.requestPharmacyApproval(
         deliveryId: item.id,
         courierName: _courierName,
@@ -8260,7 +12741,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ..showSnackBar(
           const SnackBar(
             content: Text(
-              'Solicitud enviada a la farmacia. Tiene 3 minutos para aprobar.',
+              'Solicitud enviada a la farmacia. Tiene 5 minutos para aprobar.',
             ),
           ),
         );
@@ -8282,9 +12763,28 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _acceptRealDelivery(Delivery item) async {
-    final accepted = await OperationsBackend.instance.acceptDelivery(
-      deliveryId: item.id,
-    );
+    bool accepted;
+    try {
+      accepted = await OperationsBackend.instance.acceptDelivery(
+        deliveryId: item.id,
+        asSupport:
+            _hasGlobalSupportShiftToday &&
+            (_basePharmacyCode == null ||
+                item.pharmacyCode != _basePharmacyCode),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      final detail = '$error'
+          .replaceFirst('PostgrestException(message: ', '')
+          .split(', code:')
+          .first
+          .replaceFirst('Exception: ', '')
+          .trim();
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('No se pudo aceptar: $detail')));
+      return;
+    }
     if (!mounted) return;
     if (!accepted) {
       ScaffoldMessenger.of(context)
@@ -8301,6 +12801,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final next = item.copyWith(status: DeliveryStatus.accepted);
     final index = _deliveries.indexWhere((delivery) => delivery.id == item.id);
     if (index >= 0) setState(() => _deliveries[index] = next);
+    unawaited(_loadCourierPharmacyBreakdown());
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) =>
@@ -8415,7 +12916,7 @@ class _HomeScreenState extends State<HomeScreen> {
         pageFormat: pdf.PdfPageFormat.a4,
         build: (context) => [
           pw.Text(
-            'FarmaNorte · Turnos de $_courierName',
+            'farmanorte · Turnos de $_courierName',
             style: pw.TextStyle(fontSize: 20, fontWeight: pw.FontWeight.bold),
           ),
           pw.SizedBox(height: 6),
@@ -8455,7 +12956,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ],
           ),
           pw.SizedBox(height: 20),
-          pw.Text('Documento generado desde la aplicación FarmaNorte.'),
+          pw.Text('Documento generado desde la aplicación farmanorte.'),
         ],
       ),
     );
@@ -8480,82 +12981,364 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  void _openMenu() {
+  void _openAlertSoundSettings() {
+    unawaited(BackgroundNotificationService.refreshPermissionStatus());
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
       backgroundColor: Colors.white,
-      builder: (sheetContext) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(22, 4, 22, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: CircleAvatar(
-                  backgroundColor: AppColors.mint,
-                  child: Icon(
-                    Icons.person_rounded,
-                    color: AppColors.primaryDark,
+      isScrollControlled: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) => SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Sonidos de alerta',
+                  style: TextStyle(
+                    color: AppColors.ink,
+                    fontSize: 21,
+                    fontWeight: FontWeight.w900,
                   ),
                 ),
-                title: Text(
-                  _courierName,
-                  style: const TextStyle(fontWeight: FontWeight.w800),
+                const SizedBox(height: 5),
+                const Text(
+                  'Controla las alertas de domicilios y mensajes del chat.',
+                  style: TextStyle(
+                    color: AppColors.muted,
+                    fontSize: 12,
+                    height: 1.35,
+                  ),
                 ),
-                subtitle: Text('Domiciliario · $_baseLabel'),
-              ),
-              const Divider(height: 24),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.schedule_rounded),
-                title: const Text('Turnos de la semana'),
-                subtitle: const Text('Ver punto base y horario publicado'),
-                onTap: () {
-                  Navigator.pop(sheetContext);
-                  _openShiftSchedule();
-                },
-              ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.history_rounded),
-                title: const Text('Historial de domicilios'),
-                onTap: () => Navigator.pop(sheetContext),
-              ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(Icons.support_agent_rounded),
-                title: const Text('Ayuda y soporte'),
-                subtitle: Text(
-                  '$farmanorteSupportName · $farmanorteSupportPhone',
+                const SizedBox(height: 8),
+                ValueListenableBuilder<NotificationPermissionStatus>(
+                  valueListenable:
+                      BackgroundNotificationService.permissionStatus,
+                  builder: (context, status, _) {
+                    final granted =
+                        status == NotificationPermissionStatus.granted;
+                    final denied =
+                        status == NotificationPermissionStatus.denied;
+                    return ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(
+                        granted
+                            ? Icons.notifications_active_outlined
+                            : Icons.notifications_off_outlined,
+                        color: granted
+                            ? AppColors.primary
+                            : denied
+                            ? AppColors.danger
+                            : AppColors.muted,
+                      ),
+                      title: Text(
+                        granted
+                            ? 'Notificaciones activadas'
+                            : denied
+                            ? 'Notificaciones desactivadas'
+                            : 'Notificaciones sin confirmar',
+                        style: const TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      subtitle: Text(
+                        granted
+                            ? 'Recibirás domicilios con la app en segundo plano.'
+                            : 'Actívalas para recibir domicilios con la app cerrada.',
+                      ),
+                      trailing: granted
+                          ? null
+                          : TextButton(
+                              onPressed: () => unawaited(
+                                BackgroundNotificationService.openNotificationSettings(),
+                              ),
+                              child: const Text('Activar'),
+                            ),
+                    );
+                  },
                 ),
-                onTap: () {
-                  Navigator.pop(sheetContext);
-                  unawaited(_callSupport());
-                },
-              ),
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                leading: const Icon(
-                  Icons.logout_rounded,
-                  color: AppColors.danger,
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text(
+                    'Sonido de notificaciones',
+                    style: TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                  subtitle: const Text('También recibirás la alerta visual.'),
+                  value: AppNotificationAudio.enabled,
+                  onChanged: (value) {
+                    unawaited(() async {
+                      await AppNotificationAudio.setEnabled(value);
+                      if (context.mounted) setSheetState(() {});
+                    }());
+                  },
                 ),
-                title: const Text('Cerrar sesión'),
-                onTap: () {
-                  Navigator.pop(sheetContext);
-                  unawaited(OperationsBackend.instance.signOut());
-                  Navigator.of(context).pushAndRemoveUntil(
-                    MaterialPageRoute<void>(
-                      builder: (_) => const LoginScreen(),
+                Row(
+                  children: [
+                    const Icon(
+                      Icons.volume_down_outlined,
+                      color: AppColors.muted,
+                      size: 18,
                     ),
-                    (_) => false,
-                  );
-                },
-              ),
-            ],
+                    Expanded(
+                      child: Slider(
+                        value: AppNotificationAudio.volume,
+                        min: .1,
+                        max: 1.0,
+                        divisions: 9,
+                        label:
+                            '${(AppNotificationAudio.volume * 100).round()}%',
+                        onChanged: (value) {
+                          unawaited(AppNotificationAudio.setVolume(value));
+                          setSheetState(() {});
+                        },
+                      ),
+                    ),
+                    const Icon(
+                      Icons.volume_up_outlined,
+                      color: AppColors.muted,
+                      size: 18,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFF8E8),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: AppColors.warning.withValues(alpha: .28),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.draw_outlined, color: AppColors.warning),
+                      const SizedBox(width: 9),
+                      Expanded(
+                        child: Text(
+                          _pendingEquivalentCount == 0
+                              ? 'No tienes equivalentes pendientes por firmar.'
+                              : 'Tienes $_pendingEquivalentCount equivalente(s) pendiente(s) por firmar. ${_money(_pendingEquivalentAmount)} no suma todavía a tus ganancias.',
+                          style: const TextStyle(
+                            color: AppColors.ink,
+                            fontSize: 11,
+                            height: 1.3,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 14),
+                RadioGroup<String>(
+                  groupValue: AppNotificationAudio.selectedSound.id,
+                  onChanged: (value) {
+                    if (value == null) return;
+                    unawaited(() async {
+                      await AppNotificationAudio.selectSound(value);
+                      if (context.mounted) setSheetState(() {});
+                    }());
+                  },
+                  child: Column(
+                    children: [
+                      for (final option in courierAlertSoundOptions)
+                        ListTile(
+                          contentPadding: EdgeInsets.zero,
+                          leading: Radio<String>(value: option.id),
+                          title: Text(
+                            option.label,
+                            style: const TextStyle(fontWeight: FontWeight.w800),
+                          ),
+                          subtitle: Text(option.description),
+                          trailing: IconButton(
+                            tooltip: 'Probar ${option.label}',
+                            onPressed: () => unawaited(
+                              AppNotificationAudio.preview(option.id),
+                            ),
+                            icon: const Icon(Icons.volume_up_outlined),
+                          ),
+                          onTap: () {
+                            unawaited(() async {
+                              await AppNotificationAudio.selectSound(option.id);
+                              if (context.mounted) setSheetState(() {});
+                            }());
+                          },
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () => Navigator.pop(sheetContext),
+                    child: const Text('Cerrar'),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
+      ),
+    );
+  }
+
+  Future<void> _openDeliveryHistory() async {
+    final history = _deliveries
+        .where(
+          (delivery) =>
+              delivery.status == DeliveryStatus.delivered ||
+              delivery.status == DeliveryStatus.notDelivered,
+        )
+        .toList()
+        .reversed
+        .toList();
+    final selected = await showModalBottomSheet<Delivery>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: Colors.white,
+      isScrollControlled: true,
+      builder: (_) => _CourierDeliveryHistorySheet(
+        deliveries: history,
+        equivalentStatuses: _equivalentStatuses,
+      ),
+    );
+    if (!mounted || selected == null) return;
+    await _openDeliveryDetail(selected);
+  }
+
+  void _logout() {
+    unawaited(() async {
+      try {
+        await OperationsBackend.instance.signOut();
+      } catch (_) {
+        // La navegación local no debe quedar bloqueada por un error remoto.
+      }
+      if (!mounted) return;
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute<void>(builder: (_) => const LoginScreen()),
+        (_) => false,
+      );
+    }());
+  }
+
+  void _openMenu() {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      builder: (sheetContext) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(sheetContext).size.height * .88,
+          ),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.fromLTRB(22, 4, 22, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: CircleAvatar(
+                    backgroundColor: AppColors.mint,
+                    child: Icon(
+                      Icons.person_rounded,
+                      color: AppColors.primaryDark,
+                    ),
+                  ),
+                  title: Text(
+                    _courierName,
+                    style: const TextStyle(fontWeight: FontWeight.w800),
+                  ),
+                  subtitle: Text('Domiciliario · $_baseLabel'),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(
+                    Icons.logout_rounded,
+                    color: AppColors.danger,
+                  ),
+                  title: const Text('Cerrar sesión'),
+                  subtitle: const Text('Salir de la cuenta actual'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _logout();
+                  },
+                ),
+                const Divider(height: 24),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.schedule_rounded),
+                  title: const Text('Turnos de la semana'),
+                  subtitle: const Text('Ver punto base y horario publicado'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _openShiftSchedule();
+                  },
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.settings_outlined),
+                  title: const Text('Configuración'),
+                  subtitle: Text('Alertas, sonido y equivalentes pendientes'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _openAlertSoundSettings();
+                  },
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.history_rounded),
+                  title: const Text('Historial de domicilios'),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _openDeliveryHistory();
+                  },
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.support_agent_rounded),
+                  title: const Text('Ayuda y soporte'),
+                  subtitle: Text(
+                    '$farmanorteSupportName · $farmanorteSupportPhone',
+                  ),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_callSupport());
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _openDeliveryChat(Delivery delivery) {
+    if (!SupabaseConfig.isConfigured) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+              'El chat requiere la conexión real de Supabase; no se usan mensajes locales.',
+            ),
+          ),
+        );
+      return;
+    }
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      backgroundColor: Colors.white,
+      builder: (_) => FractionallySizedBox(
+        heightFactor: .78,
+        child: DeliveryChatSheet(deliveryId: delivery.id),
       ),
     );
   }
@@ -8570,6 +13353,7 @@ class _HomeScreenState extends State<HomeScreen> {
               padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
               child: _HomeTopBar(
                 connected: _connected,
+                inBackground: _appInBackground,
                 courierName: _courierName,
                 onMenu: _openMenu,
                 onChanged: _setConnected,
@@ -8578,25 +13362,26 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 10),
             Expanded(
               child: _HomeSheet(
-                connected: _connected,
+                connected: _connected && !_appInBackground,
                 baseLabel: _baseLabel,
                 autoAccepting: _autoAccepting,
                 available: _available,
                 active: _active,
                 pendingApprovals: _pendingApprovals,
                 earnings: _earnings,
+                feeSummary: _feeSummary,
+                loadingFeeSummary: _loadingFeeSummary,
                 onAutoAccept: _setAutoAccepting,
                 onAccept: _accept,
                 onDetail: (item) {
-                  Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => DeliveryDetailScreen(
-                        delivery: item,
-                        onChanged: _replace,
-                      ),
-                    ),
-                  );
+                  unawaited(_openDeliveryDetail(item));
                 },
+                onChat: _openDeliveryChat,
+                pendingEquivalentCount: _pendingEquivalentCount,
+                pendingEquivalentAmount: _pendingEquivalentAmount,
+                courierPharmacyBreakdown: _courierPharmacyBreakdown,
+                loadingCourierBreakdown: _loadingCourierBreakdown,
+                courierPharmacyBreakdownError: _courierPharmacyBreakdownError,
               ),
             ),
           ],
@@ -8609,12 +13394,14 @@ class _HomeScreenState extends State<HomeScreen> {
 class _HomeTopBar extends StatelessWidget {
   const _HomeTopBar({
     required this.connected,
+    required this.inBackground,
     required this.courierName,
     required this.onMenu,
     required this.onChanged,
   });
 
   final bool connected;
+  final bool inBackground;
   final String courierName;
   final VoidCallback onMenu;
   final ValueChanged<bool> onChanged;
@@ -8634,23 +13421,28 @@ class _HomeTopBar extends StatelessWidget {
             onPressed: onMenu,
             icon: const Icon(Icons.menu_rounded),
           ),
-          const CircleAvatar(
-            radius: 17,
-            backgroundColor: AppColors.mint,
-            child: Icon(
-              Icons.delivery_dining_rounded,
-              color: AppColors.primaryDark,
-              size: 20,
+          SizedBox(
+            width: 82,
+            height: 30,
+            child: Image.asset(
+              'assets/farmanorte-brand.png',
+              fit: BoxFit.contain,
+              alignment: Alignment.centerLeft,
+              semanticLabel: 'farmanorte',
             ),
           ),
-          const SizedBox(width: 10),
+          const SizedBox(width: 8),
           Expanded(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  connected ? 'Estás conectado' : 'Estás desconectado',
+                  inBackground
+                      ? 'En segundo plano'
+                      : connected
+                      ? 'Estás conectado'
+                      : 'Estás desconectado',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -8660,7 +13452,9 @@ class _HomeTopBar extends StatelessWidget {
                   ),
                 ),
                 Text(
-                  connected
+                  inBackground
+                      ? 'Las alertas push siguen activas'
+                      : connected
                       ? 'Recibiendo pedidos de tu zona'
                       : 'Activa para recibir pedidos',
                   maxLines: 1,
@@ -8711,7 +13505,15 @@ class _HomeSheet extends StatelessWidget {
     required this.onAutoAccept,
     required this.onAccept,
     required this.onDetail,
+    required this.onChat,
     required this.earnings,
+    required this.feeSummary,
+    required this.loadingFeeSummary,
+    required this.pendingEquivalentCount,
+    required this.pendingEquivalentAmount,
+    required this.courierPharmacyBreakdown,
+    required this.loadingCourierBreakdown,
+    required this.courierPharmacyBreakdownError,
   });
 
   final bool connected;
@@ -8723,7 +13525,15 @@ class _HomeSheet extends StatelessWidget {
   final ValueChanged<bool> onAutoAccept;
   final ValueChanged<Delivery> onAccept;
   final ValueChanged<Delivery> onDetail;
+  final ValueChanged<Delivery> onChat;
   final double earnings;
+  final CourierFeeSummary? feeSummary;
+  final bool loadingFeeSummary;
+  final int pendingEquivalentCount;
+  final double pendingEquivalentAmount;
+  final List<CourierPharmacyBreakdown> courierPharmacyBreakdown;
+  final bool loadingCourierBreakdown;
+  final String? courierPharmacyBreakdownError;
 
   @override
   Widget build(BuildContext context) => Material(
@@ -8779,6 +13589,36 @@ class _HomeSheet extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 16),
+        if (!connected)
+          Container(
+            margin: const EdgeInsets.only(bottom: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: AppColors.line),
+            ),
+            child: const Row(
+              children: [
+                Icon(
+                  Icons.lock_outline_rounded,
+                  color: AppColors.muted,
+                  size: 18,
+                ),
+                SizedBox(width: 9),
+                Expanded(
+                  child: Text(
+                    'Estás desconectado: los botones de aceptar están bloqueados.',
+                    style: TextStyle(
+                      color: AppColors.muted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         Container(
           padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
           decoration: BoxDecoration(
@@ -8828,7 +13668,9 @@ class _HomeSheet extends StatelessWidget {
                       !connected
                           ? 'Conéctate para activar la recepción automática.'
                           : autoAccepting
-                          ? 'Solo autoacepta domicilios de $baseLabel; los demás se toman manualmente.'
+                          ? baseLabel.startsWith('Apoyo general')
+                                ? 'Autoacepta domicilios de todas las zonas como apoyo general.'
+                                : 'Solo autoacepta domicilios de $baseLabel; los demás se toman manualmente.'
                           : 'Desactivado. Actívalo solo si quieres priorizar tu punto base.',
                       maxLines: 2,
                       style: const TextStyle(
@@ -8871,6 +13713,118 @@ class _HomeSheet extends StatelessWidget {
             ),
           ],
         ),
+        if (pendingEquivalentCount > 0) ...[
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFF8E8),
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(
+                color: AppColors.warning.withValues(alpha: .3),
+              ),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.draw_outlined, color: AppColors.warning),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Equivalentes pendientes por firmar',
+                        style: TextStyle(
+                          color: AppColors.ink,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        '$pendingEquivalentCount servicio(s) · ${_money(pendingEquivalentAmount)} aún no suma a tus ganancias.',
+                        style: const TextStyle(
+                          color: AppColors.muted,
+                          fontSize: 10.5,
+                          height: 1.3,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: AppColors.line),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: AppColors.warning.withValues(alpha: .12),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.account_balance_wallet_outlined,
+                  color: AppColors.warning,
+                ),
+              ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Cuota de esta semana',
+                      style: TextStyle(
+                        color: AppColors.ink,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      loadingFeeSummary
+                          ? 'Calculando según tus turnos…'
+                          : feeSummary == null
+                          ? 'Disponible cuando el administrador publique los turnos.'
+                          : '${feeSummary!.scheduledDays} días · ${feeSummary!.doubleShiftCount} dobles · pagado ${_money(feeSummary!.totalPaid)}',
+                      style: const TextStyle(
+                        color: AppColors.muted,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Text(
+                feeSummary == null ? '—' : _money(feeSummary!.balanceDue),
+                style: const TextStyle(
+                  color: AppColors.warning,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        _CourierPharmacyBreakdownCard(
+          breakdown: courierPharmacyBreakdown,
+          loading: loadingCourierBreakdown,
+          error: courierPharmacyBreakdownError,
+        ),
         const SizedBox(height: 22),
         Row(
           children: [
@@ -8895,36 +13849,6 @@ class _HomeSheet extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 10),
-        if (!connected)
-          Container(
-            margin: const EdgeInsets.only(bottom: 10),
-            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: AppColors.line),
-            ),
-            child: const Row(
-              children: [
-                Icon(
-                  Icons.lock_outline_rounded,
-                  color: AppColors.muted,
-                  size: 18,
-                ),
-                SizedBox(width: 9),
-                Expanded(
-                  child: Text(
-                    'Estás desconectado: los botones de aceptar están bloqueados.',
-                    style: TextStyle(
-                      color: AppColors.muted,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
         if (available.isEmpty)
           _Notice(
             icon: connected
@@ -8957,7 +13881,7 @@ class _HomeSheet extends StatelessWidget {
           ),
           const SizedBox(height: 5),
           const Text(
-            'La solicitud vence en 3 minutos. Puedes seguir recibiendo otros domicilios.',
+            'La solicitud vence en 5 minutos. Puedes seguir recibiendo otros domicilios.',
             style: TextStyle(
               color: AppColors.muted,
               fontSize: 11,
@@ -8972,6 +13896,7 @@ class _HomeSheet extends StatelessWidget {
                 delivery: item,
                 compact: true,
                 onPressed: () => onDetail(item),
+                onChat: () => onChat(item),
               ),
             ),
           ),
@@ -8994,11 +13919,96 @@ class _HomeSheet extends StatelessWidget {
                 delivery: item,
                 compact: true,
                 onPressed: () => onDetail(item),
+                onChat: () => onChat(item),
               ),
             ),
           ),
         ],
       ],
+    ),
+  );
+}
+
+class _CourierDeliveryHistorySheet extends StatelessWidget {
+  const _CourierDeliveryHistorySheet({
+    required this.deliveries,
+    required this.equivalentStatuses,
+  });
+
+  final List<Delivery> deliveries;
+  final Map<String, String> equivalentStatuses;
+
+  @override
+  Widget build(BuildContext context) => SafeArea(
+    child: SizedBox(
+      height: MediaQuery.sizeOf(context).height * .78,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 22),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Historial de domicilios',
+              style: TextStyle(
+                color: AppColors.ink,
+                fontSize: 21,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 4),
+            const Text(
+              'Servicios terminados y novedades registrados desde Supabase.',
+              style: TextStyle(
+                color: AppColors.muted,
+                fontSize: 12,
+                height: 1.35,
+              ),
+            ),
+            const SizedBox(height: 14),
+            Expanded(
+              child: deliveries.isEmpty
+                  ? const _Notice(
+                      icon: Icons.history_toggle_off_rounded,
+                      title: 'Todavía no hay domicilios terminados',
+                      message: 'Cuando entregues un servicio aparecerá aquí.',
+                    )
+                  : ListView.separated(
+                      itemCount: deliveries.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 10),
+                      itemBuilder: (context, index) {
+                        final delivery = deliveries[index];
+                        final status = equivalentStatuses[delivery.id];
+                        final released =
+                            status == 'signed' || status == 'acknowledged';
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            DeliveryListItem(
+                              delivery: delivery,
+                              compact: true,
+                              onPressed: () => Navigator.pop(context, delivery),
+                            ),
+                            if (!released)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 5),
+                                child: Text(
+                                  'Pendiente por firmar · no suma a tus ganancias',
+                                  textAlign: TextAlign.right,
+                                  style: const TextStyle(
+                                    color: AppColors.warning,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                          ],
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
     ),
   );
 }
@@ -9033,6 +14043,172 @@ class _ConnectionBadge extends StatelessWidget {
             fontSize: 12,
           ),
         ),
+      ],
+    ),
+  );
+}
+
+class _CourierPharmacyBreakdownCard extends StatelessWidget {
+  const _CourierPharmacyBreakdownCard({
+    required this.breakdown,
+    required this.loading,
+    required this.error,
+  });
+
+  final List<CourierPharmacyBreakdown> breakdown;
+  final bool loading;
+  final String? error;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.fromLTRB(14, 13, 14, 10),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(18),
+      border: Border.all(color: AppColors.line),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              decoration: BoxDecoration(
+                color: AppColors.pharmacyBlueSoft,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: const Icon(
+                Icons.bar_chart_rounded,
+                color: AppColors.pharmacyBlue,
+              ),
+            ),
+            const SizedBox(width: 11),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Domicilios por farmacia',
+                    style: TextStyle(
+                      color: AppColors.ink,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  SizedBox(height: 3),
+                  Text(
+                    'Entregas realizadas · ganancias liberadas al firmar',
+                    style: TextStyle(
+                      color: AppColors.muted,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        if (loading)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                SizedBox(width: 8),
+                Text(
+                  'Actualizando desglose…',
+                  style: TextStyle(
+                    color: AppColors.muted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          )
+        else if (error != null && error!.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Text(
+              'No se pudo consultar el desglose: $error',
+              style: const TextStyle(
+                color: AppColors.danger,
+                fontSize: 11,
+                height: 1.35,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          )
+        else if (breakdown.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 6),
+            child: Text(
+              'Aún no tienes domicilios entregados para mostrar.',
+              style: TextStyle(
+                color: AppColors.muted,
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          )
+        else
+          ...breakdown.map(
+            (item) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                children: [
+                  Container(
+                    width: 8,
+                    height: 8,
+                    decoration: const BoxDecoration(
+                      color: AppColors.primary,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'FN ${item.pharmacyCode}',
+                          style: const TextStyle(
+                            color: AppColors.ink,
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        Text(
+                          '${item.serviceCount} entregado(s) · ${item.baseCount} base · ${item.supportCount} apoyo',
+                          style: const TextStyle(
+                            color: AppColors.muted,
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Text(
+                    _money(item.totalEarnings),
+                    style: const TextStyle(
+                      color: AppColors.primaryDark,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
       ],
     ),
   );
@@ -9089,12 +14265,14 @@ class DeliveryListItem extends StatelessWidget {
   const DeliveryListItem({
     required this.delivery,
     required this.onPressed,
+    this.onChat,
     this.compact = false,
     super.key,
   });
 
   final Delivery delivery;
   final VoidCallback? onPressed;
+  final VoidCallback? onChat;
   final bool compact;
 
   @override
@@ -9124,6 +14302,8 @@ class DeliveryListItem extends StatelessWidget {
                           service: delivery.service,
                         ),
                         _StatusPill(status: delivery.status),
+                        if (delivery.status != DeliveryStatus.offered)
+                          _AssignmentPill(support: delivery.assignedAsSupport),
                       ],
                     ),
                   ),
@@ -9257,18 +14437,55 @@ class DeliveryListItem extends StatelessWidget {
                       ),
                     )
                   else
-                    TextButton.icon(
-                      onPressed: onPressed,
-                      icon: const Icon(Icons.arrow_forward_rounded, size: 16),
-                      label: const Text('Ver detalle'),
-                      style: TextButton.styleFrom(
-                        foregroundColor: AppColors.primaryDark,
-                        padding: EdgeInsets.zero,
-                        textStyle: const TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w900,
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (onChat != null)
+                          OutlinedButton.icon(
+                            onPressed: onChat,
+                            icon: const Icon(
+                              Icons.chat_bubble_outline_rounded,
+                              size: 16,
+                            ),
+                            label: const Text('Chat'),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: AppColors.blue,
+                              side: BorderSide(
+                                color: AppColors.blue.withValues(alpha: .28),
+                              ),
+                              backgroundColor: AppColors.pharmacyBlueSoft,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                              ),
+                              minimumSize: const Size(0, 36),
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              textStyle: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                        const SizedBox(width: 10),
+                        TextButton.icon(
+                          onPressed: onPressed,
+                          icon: const Icon(
+                            Icons.arrow_forward_rounded,
+                            size: 16,
+                          ),
+                          label: const Text('Ver detalle'),
+                          style: TextButton.styleFrom(
+                            foregroundColor: AppColors.primaryDark,
+                            padding: EdgeInsets.zero,
+                            textStyle: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
                         ),
-                      ),
+                      ],
                     ),
                 ],
               ),
@@ -9352,6 +14569,7 @@ class DeliveryDetailScreen extends StatefulWidget {
 
 class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
   late Delivery _delivery;
+  bool _savingStatus = false;
 
   @override
   void initState() {
@@ -9359,10 +14577,46 @@ class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
     _delivery = widget.delivery;
   }
 
-  void _setStatus(DeliveryStatus status) {
-    final updated = _delivery.copyWith(status: status);
-    setState(() => _delivery = updated);
-    widget.onChanged?.call(updated);
+  Future<void> _setStatus(DeliveryStatus status) async {
+    if (_savingStatus || status == _delivery.status) return;
+    setState(() => _savingStatus = true);
+    try {
+      if (_delivery.status == DeliveryStatus.offered &&
+          status == DeliveryStatus.accepted &&
+          SupabaseConfig.isConfigured) {
+        final accepted = await OperationsBackend.instance.acceptDelivery(
+          deliveryId: _delivery.id,
+          asSupport: _delivery.assignedAsSupport,
+        );
+        if (!accepted) {
+          throw StateError('El domicilio ya no está disponible para aceptar.');
+        }
+      } else {
+        await OperationsBackend.instance.updateDeliveryStatus(
+          deliveryId: _delivery.id,
+          status: status,
+        );
+      }
+      if (!mounted) return;
+      final updated = _delivery.copyWith(status: status);
+      setState(() => _delivery = updated);
+      widget.onChanged?.call(updated);
+    } catch (error) {
+      if (!mounted) return;
+      final detail = '$error'
+          .replaceFirst('PostgrestException(message: ', '')
+          .split(', code:')
+          .first
+          .replaceFirst('Exception: ', '')
+          .trim();
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text('No se pudo actualizar: $detail')),
+        );
+    } finally {
+      if (mounted) setState(() => _savingStatus = false);
+    }
   }
 
   void _selectDestination(int index) {
@@ -9461,110 +14715,53 @@ class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
   }
 
   void _openChat() {
-    final messageController = TextEditingController();
-    final messages = <String>[
-      'Canal del domicilio ${_delivery.id}.',
-      'Farmacia y domiciliario pueden coordinar aquí.',
-    ];
+    if (!SupabaseConfig.isConfigured) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+              'El chat requiere la conexión real de Supabase; no se usan mensajes locales.',
+            ),
+          ),
+        );
+      return;
+    }
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (sheetContext) => StatefulBuilder(
-        builder: (context, setSheetState) => Padding(
-          padding: EdgeInsets.fromLTRB(
-            18,
-            4,
-            18,
-            MediaQuery.viewInsetsOf(context).bottom + 20,
-          ),
-          child: SafeArea(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Chat del domicilio',
-                  style: TextStyle(
-                    color: AppColors.ink,
-                    fontSize: 19,
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                const Text(
-                  'La farmacia, el domiciliario y el administrador pueden participar.',
-                  style: TextStyle(color: AppColors.muted, fontSize: 11.5),
-                ),
-                const SizedBox(height: 14),
-                ...messages.map(
-                  (message) => Container(
-                    width: double.infinity,
-                    margin: const EdgeInsets.only(bottom: 7),
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: AppColors.canvas,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(
-                      message,
-                      style: const TextStyle(
-                        color: AppColors.ink,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextField(
-                        controller: messageController,
-                        decoration: const InputDecoration(
-                          labelText: 'Escribe un mensaje',
-                          prefixIcon: Icon(Icons.chat_bubble_outline_rounded),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    IconButton.filled(
-                      tooltip: 'Enviar mensaje',
-                      onPressed: () {
-                        final message = messageController.text.trim();
-                        if (message.isEmpty) return;
-                        setSheetState(() {
-                          messages.add(message);
-                          messageController.clear();
-                        });
-                      },
-                      icon: const Icon(Icons.send_rounded),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    OutlinedButton.icon(
-                      onPressed: () {},
-                      icon: const Icon(Icons.photo_camera_outlined, size: 17),
-                      label: const Text('Foto opcional'),
-                    ),
-                    const SizedBox(width: 8),
-                    TextButton.icon(
-                      onPressed: () =>
-                          _launchPhoneCall(_delivery.recipientPhone),
-                      icon: const Icon(Icons.call_outlined, size: 17),
-                      label: const Text('Llamar'),
-                    ),
-                  ],
-                ),
-              ],
+      backgroundColor: Colors.white,
+      builder: (_) => FractionallySizedBox(
+        heightFactor: .78,
+        child: DeliveryChatSheet(deliveryId: _delivery.id),
+      ),
+    );
+  }
+
+  void _openEquivalent() {
+    if (!SupabaseConfig.isConfigured) {
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+              'El equivalente requiere la conexión real de Supabase; no se generan soportes locales.',
             ),
           ),
-        ),
+        );
+      return;
+    }
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      backgroundColor: Colors.white,
+      builder: (_) => FractionallySizedBox(
+        heightFactor: .86,
+        child: DeliveryEquivalentSheet(deliveryId: _delivery.id),
       ),
-    ).whenComplete(messageController.dispose);
+    );
   }
 
   String _mapsDestination(String address, LatLng fallback) {
@@ -9594,14 +14791,14 @@ class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
     DeliveryStatus.notDelivered => 'Novedad registrada',
   };
 
-  void _advance() {
+  Future<void> _advance() async {
     switch (_delivery.status) {
       case DeliveryStatus.offered:
-        _setStatus(DeliveryStatus.accepted);
+        await _setStatus(DeliveryStatus.accepted);
       case DeliveryStatus.accepted:
-        _setStatus(DeliveryStatus.pickedUp);
+        await _setStatus(DeliveryStatus.pickedUp);
       case DeliveryStatus.pickedUp:
-        _setStatus(DeliveryStatus.delivered);
+        await _setStatus(DeliveryStatus.delivered);
       case DeliveryStatus.delivered:
         Navigator.pop(context);
       case DeliveryStatus.notDelivered:
@@ -9630,8 +14827,9 @@ class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
       ),
     );
     if (outcome != 'customer_refused' || !mounted) return;
+    await _setStatus(DeliveryStatus.notDelivered);
+    if (!mounted || _delivery.status != DeliveryStatus.notDelivered) return;
     final updated = _delivery.copyWith(
-      status: DeliveryStatus.notDelivered,
       deliveryOutcome:
           'Cliente no recibió el pedido. La farmacia debe pagar \$5.000.',
     );
@@ -9648,16 +14846,10 @@ class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
 
   @override
   Widget build(BuildContext context) => Scaffold(
+    backgroundColor: AppColors.canvas,
     body: Stack(
       fit: StackFit.expand,
       children: [
-        Positioned.fill(
-          child: CourierMap(
-            delivery: _delivery,
-            showCurrentLocation: true,
-            showHomeStops: false,
-          ),
-        ),
         Positioned(
           top: 0,
           left: 0,
@@ -9749,10 +14941,11 @@ class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
           left: 0,
           right: 0,
           bottom: 0,
-          height: MediaQuery.sizeOf(context).height * .72,
+          top: MediaQuery.paddingOf(context).top + 12 + 46,
           child: _DetailSheet(
             delivery: _delivery,
             action: _action,
+            advancing: _savingStatus,
             onAdvance: _advance,
             onOrigin: () => _openGoogleMaps(
               address: _delivery.storeAddress,
@@ -9766,6 +14959,8 @@ class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
             onCallClient: _callClient,
             onCashReceived: _askCashReceived,
             onPickupStop: _openPickupStop,
+            onChat: _openChat,
+            onEquivalent: _openEquivalent,
           ),
         ),
       ],
@@ -9773,10 +14968,1194 @@ class _DeliveryDetailScreenState extends State<DeliveryDetailScreen> {
   );
 }
 
+class DeliveryChatSheet extends StatefulWidget {
+  const DeliveryChatSheet({required this.deliveryId, super.key});
+
+  final String deliveryId;
+
+  @override
+  State<DeliveryChatSheet> createState() => _DeliveryChatSheetState();
+}
+
+class _DeliveryChatSheetState extends State<DeliveryChatSheet> {
+  final _messageController = TextEditingController();
+  StreamSubscription<List<DeliveryChatMessage>>? _chatSubscription;
+  List<DeliveryChatMessage> _messages = const [];
+  String? _error;
+  bool _loading = true;
+  bool _sending = false;
+  bool _chatBaselineReady = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_startChat());
+  }
+
+  Future<void> _startChat() async {
+    final stream = await OperationsBackend.instance.watchDeliveryChat(
+      deliveryId: widget.deliveryId,
+    );
+    if (!mounted) return;
+    if (stream == null) {
+      setState(() {
+        _loading = false;
+        _error = 'No se pudo conectar al chat real de este domicilio.';
+      });
+      return;
+    }
+    _chatSubscription = stream.listen(
+      (messages) {
+        if (!mounted) return;
+        final existingIds = _messages.map((message) => message.id).toSet();
+        final currentUserId = OperationsBackend.instance.currentUserId;
+        final incoming = _chatBaselineReady
+            ? messages.where(
+                (message) =>
+                    !existingIds.contains(message.id) &&
+                    message.senderId != currentUserId,
+              )
+            : const <DeliveryChatMessage>[];
+        _chatBaselineReady = true;
+        setState(() {
+          _messages = messages;
+          _loading = false;
+        });
+        // Una sola alerta por mensaje aunque también llegue el push.
+        final firstAlert = incoming
+            .map(
+              (message) =>
+                  AppNotificationAudio.claimAlert('chat:${message.id}'),
+            )
+            .toList()
+            .contains(true);
+        if (firstAlert) {
+          unawaited(AppNotificationAudio.playMessageAlert());
+        }
+      },
+      onError: (Object error) {
+        if (!mounted) return;
+        setState(() {
+          _loading = false;
+          _error = 'No se pudieron cargar los mensajes: $error';
+        });
+      },
+    );
+  }
+
+  Future<void> _sendMessage() async {
+    final body = _messageController.text.trim();
+    if (body.isEmpty || _sending) return;
+    setState(() {
+      _sending = true;
+      _error = null;
+    });
+    try {
+      final sent = await OperationsBackend.instance.sendDeliveryChat(
+        deliveryId: widget.deliveryId,
+        body: body,
+      );
+      if (!mounted) return;
+      if (!_messages.any((message) => message.id == sent.id)) {
+        setState(() => _messages = [..._messages, sent]);
+      }
+      _messageController.clear();
+    } catch (error) {
+      if (mounted) setState(() => _error = 'No se pudo enviar: $error');
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  String _timeLabel(DateTime value) {
+    final local = value.toLocal();
+    final hour = local.hour.toString().padLeft(2, '0');
+    final minute = local.minute.toString().padLeft(2, '0');
+    return '$hour:$minute';
+  }
+
+  String _roleLabel(String role) => switch (role) {
+    'pharmacy' => 'Farmacia',
+    'courier' => 'Domiciliario',
+    'admin' => 'Administrador',
+    _ => 'Operador',
+  };
+
+  @override
+  void dispose() {
+    _chatSubscription?.cancel();
+    _messageController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final currentUserId = OperationsBackend.instance.currentUserId;
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          16,
+          0,
+          16,
+          MediaQuery.viewInsetsOf(context).bottom + 16,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Chat del domicilio',
+              style: TextStyle(
+                color: AppColors.ink,
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Conversación guardada para ${widget.deliveryId}.',
+              style: const TextStyle(
+                color: AppColors.muted,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _messages.isEmpty
+                  ? const Center(
+                      child: Text(
+                        'Todavía no hay mensajes. Coordina aquí con la farmacia.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: AppColors.muted,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    )
+                  : ListView.separated(
+                      reverse: false,
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      itemCount: _messages.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 8),
+                      itemBuilder: (context, index) {
+                        final message = _messages[index];
+                        final own = message.senderId == currentUserId;
+                        return Align(
+                          alignment: own
+                              ? Alignment.centerRight
+                              : Alignment.centerLeft,
+                          child: ConstrainedBox(
+                            constraints: BoxConstraints(
+                              maxWidth: MediaQuery.sizeOf(context).width * .82,
+                            ),
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                color: own ? AppColors.mint : AppColors.canvas,
+                                borderRadius: BorderRadius.only(
+                                  topLeft: const Radius.circular(14),
+                                  topRight: const Radius.circular(14),
+                                  bottomLeft: Radius.circular(own ? 14 : 4),
+                                  bottomRight: Radius.circular(own ? 4 : 14),
+                                ),
+                                border: Border.all(color: AppColors.line),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  11,
+                                  9,
+                                  11,
+                                  9,
+                                ),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          message.senderName,
+                                          style: const TextStyle(
+                                            color: AppColors.ink,
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w900,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 7),
+                                        Text(
+                                          _roleLabel(message.senderRole),
+                                          style: const TextStyle(
+                                            color: AppColors.muted,
+                                            fontSize: 9,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                        const SizedBox(width: 7),
+                                        Text(
+                                          _timeLabel(message.createdAt),
+                                          style: const TextStyle(
+                                            color: AppColors.muted,
+                                            fontSize: 9,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      message.body,
+                                      style: const TextStyle(
+                                        color: AppColors.ink,
+                                        fontSize: 12,
+                                        height: 1.35,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+            if (_error != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                _error!,
+                style: const TextStyle(color: AppColors.danger, fontSize: 10),
+              ),
+            ],
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _messageController,
+                    enabled: !_sending,
+                    maxLength: 2000,
+                    minLines: 1,
+                    maxLines: 3,
+                    textInputAction: TextInputAction.send,
+                    onSubmitted: (_) => unawaited(_sendMessage()),
+                    decoration: const InputDecoration(
+                      counterText: '',
+                      labelText: 'Escribe un mensaje',
+                      prefixIcon: Icon(Icons.chat_bubble_outline_rounded),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filled(
+                  tooltip: 'Enviar mensaje',
+                  onPressed: _sending ? null : () => unawaited(_sendMessage()),
+                  icon: _sending
+                      ? const SizedBox(
+                          width: 17,
+                          height: 17,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.send_rounded),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class DeliveryEquivalentSheet extends StatefulWidget {
+  const DeliveryEquivalentSheet({required this.deliveryId, super.key});
+
+  final String deliveryId;
+
+  @override
+  State<DeliveryEquivalentSheet> createState() =>
+      _DeliveryEquivalentSheetState();
+}
+
+class _DeliveryEquivalentSheetState extends State<DeliveryEquivalentSheet> {
+  final _signaturePadController = SignatureController(
+    penStrokeWidth: 2.6,
+    penColor: AppColors.ink,
+    exportBackgroundColor: Colors.white,
+  );
+  final _receiptKey = GlobalKey();
+  DeliveryEquivalent? _equivalent;
+  String? _error;
+  bool _loading = true;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadEquivalent());
+  }
+
+  Future<void> _loadEquivalent() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final equivalent = await OperationsBackend.instance
+          .loadDeliveryEquivalent(deliveryId: widget.deliveryId);
+      if (!mounted) return;
+      setState(() {
+        _equivalent = equivalent;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = 'No se pudo cargar el equivalente: $error';
+      });
+    }
+  }
+
+  Future<void> _signEquivalent() async {
+    final equivalent = _equivalent;
+    if (equivalent != null && _signatureWindowExpired(equivalent)) {
+      if (mounted) {
+        setState(
+          () => _error =
+              'Venció el plazo de seis días para firmar este equivalente.',
+        );
+      }
+      return;
+    }
+    if (equivalent == null || _signaturePadController.isEmpty || _saving) {
+      if (mounted && equivalent != null && _signaturePadController.isEmpty) {
+        setState(
+          () => _error = 'Dibuja tu firma en el recuadro antes de guardar.',
+        );
+      }
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      final signatureBytes = await _signaturePadController.toPngBytes(
+        width: 720,
+        height: 220,
+      );
+      if (signatureBytes == null || signatureBytes.isEmpty) {
+        throw StateError('No se pudo capturar la firma manuscrita.');
+      }
+      await OperationsBackend.instance.signDeliveryEquivalent(
+        equivalentId: equivalent.id,
+        signatureName: 'Firma manuscrita',
+        signatureImage: 'data:image/png;base64,${base64Encode(signatureBytes)}',
+      );
+      await _loadEquivalent();
+    } catch (error) {
+      if (mounted) setState(() => _error = 'No se pudo firmar: $error');
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  String _dateLabel(DateTime value) {
+    final local = value.toLocal();
+    return '${local.day.toString().padLeft(2, '0')}/'
+        '${local.month.toString().padLeft(2, '0')}/'
+        '${local.year} · ${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}';
+  }
+
+  bool _signatureWindowExpired(DeliveryEquivalent equivalent) =>
+      DateTime.now().isAfter(equivalent.createdAt.add(const Duration(days: 6)));
+
+  String _invoiceNumber(DeliveryEquivalent equivalent) {
+    final raw =
+        '${equivalent.metadata['public_code'] ?? equivalent.deliveryId}';
+    return formatDeliveryPublicCode(raw);
+  }
+
+  String _concept(DeliveryEquivalent equivalent) {
+    final service = equivalent.serviceLabel.toLowerCase();
+    final description = equivalent.description.trim();
+    final rawStops = equivalent.metadata['pickup_stops'];
+    final crossRoutes = rawStops is List
+        ? rawStops
+              .whereType<Map>()
+              .map((stop) {
+                final origin =
+                    stop['origin_pharmacy_code'] ??
+                    stop['originPharmacyCode'] ??
+                    stop['pharmacy_code'];
+                final destination =
+                    stop['destination_pharmacy_code'] ??
+                    stop['destinationPharmacyCode'];
+                if (origin == null || destination == null) return null;
+                return '${formatPharmacyCodeLabel(origin)} a '
+                    '${formatPharmacyCodeLabel(destination)}';
+              })
+              .whereType<String>()
+              .toList()
+        : const <String>[];
+    if (service.contains('cruce') && crossRoutes.isNotEmpty) {
+      final prefix = service.contains('compra')
+          ? 'Se realiza domicilio con compra y cruce.'
+          : 'Se realiza cruce de';
+      final routeText = prefix == 'Se realiza cruce de'
+          ? '$prefix ${crossRoutes.join(' · ')}.'
+          : '$prefix Cruce de ${crossRoutes.join(' · ')}.';
+      return routeText;
+    }
+    if (service.contains('compra') && service.contains('cruce')) {
+      return 'Se hace domicilio con compra y cruce. $description'.trim();
+    }
+    if (service.contains('cruce')) {
+      return 'Se hace domicilio con cruce. $description'.trim();
+    }
+    if (service.contains('compra')) {
+      return 'Se hace compra externa. $description'.trim();
+    }
+    if (service.contains('domicilio')) {
+      final payment = switch (equivalent.paymentMethod) {
+        'cash' => 'efectivo',
+        'card' || 'qr' => 'datáfono',
+        _ => 'el método de pago registrado',
+      };
+      return 'Se hace domicilio con $payment.';
+    }
+    return description.isEmpty
+        ? 'Servicio de mensajería registrado.'
+        : description;
+  }
+
+  Future<void> _downloadPdf(DeliveryEquivalent equivalent) async {
+    final logoData = await rootBundle.load('assets/jr-mensajeria-express.png');
+    final logo = pw.MemoryImage(logoData.buffer.asUint8List());
+    final invoiceNumber = _invoiceNumber(equivalent);
+    final concept = _concept(equivalent);
+    final signatureImageBytes = _signatureImageBytes(
+      equivalent.courierSignatureImage,
+    );
+    final document = pw.Document();
+    document.addPage(
+      pw.Page(
+        pageFormat: pdf.PdfPageFormat.a5,
+        margin: const pw.EdgeInsets.all(22),
+        build: (context) => pw.Container(
+          padding: const pw.EdgeInsets.all(13),
+          decoration: pw.BoxDecoration(
+            border: pw.Border.all(color: pdf.PdfColors.blueGrey400),
+            borderRadius: const pw.BorderRadius.all(pw.Radius.circular(8)),
+          ),
+          child: pw.Column(
+            crossAxisAlignment: pw.CrossAxisAlignment.stretch,
+            children: [
+              pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.center,
+                children: [
+                  pw.Image(logo, width: 75, height: 47, fit: pw.BoxFit.contain),
+                  pw.SizedBox(width: 7),
+                  pw.Expanded(
+                    child: pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.start,
+                      children: [
+                        pw.Text(
+                          'JR Mensajería Express',
+                          style: pw.TextStyle(
+                            fontSize: 9,
+                            fontWeight: pw.FontWeight.bold,
+                          ),
+                        ),
+                        pw.Text(
+                          '324 660 2056',
+                          style: const pw.TextStyle(
+                            fontSize: 7,
+                            color: pdf.PdfColors.blueGrey700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  pw.Container(
+                    padding: const pw.EdgeInsets.all(5),
+                    decoration: pw.BoxDecoration(
+                      border: pw.Border.all(color: pdf.PdfColors.blueGrey300),
+                    ),
+                    child: pw.Column(
+                      children: [
+                        pw.Text(
+                          'No.',
+                          style: const pw.TextStyle(
+                            fontSize: 6,
+                            color: pdf.PdfColors.blueGrey600,
+                          ),
+                        ),
+                        pw.Text(
+                          invoiceNumber,
+                          style: pw.TextStyle(
+                            fontSize: 7,
+                            fontWeight: pw.FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              pw.Divider(color: pdf.PdfColors.blueGrey200),
+              pw.Row(
+                children: [
+                  pw.Expanded(
+                    child: _pdfField('Fecha', _dateLabel(equivalent.createdAt)),
+                  ),
+                  pw.SizedBox(width: 12),
+                  pw.Expanded(
+                    child: _pdfField('Valor \$', _money(equivalent.amount)),
+                  ),
+                ],
+              ),
+              _pdfLine(
+                'Recibo de',
+                formatPharmacyDisplay(equivalent.pharmacyCode),
+              ),
+              pw.SizedBox(height: 8),
+              pw.Text(
+                'POR CONCEPTO DE',
+                style: pw.TextStyle(
+                  fontSize: 6,
+                  color: pdf.PdfColors.blueGrey600,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+              pw.SizedBox(height: 4),
+              pw.Text(
+                concept,
+                style: pw.TextStyle(
+                  fontSize: 8,
+                  fontWeight: pw.FontWeight.bold,
+                ),
+              ),
+              pw.SizedBox(height: 26),
+              pw.Divider(color: pdf.PdfColors.blueGrey200),
+              pw.Row(
+                crossAxisAlignment: pw.CrossAxisAlignment.end,
+                children: [
+                  pw.Expanded(
+                    child: pw.Column(
+                      crossAxisAlignment: pw.CrossAxisAlignment.start,
+                      children: [
+                        _pdfField(
+                          'Firma',
+                          equivalent.courierSignatureName ??
+                              'Pendiente de firma',
+                        ),
+                        if (signatureImageBytes != null) ...[
+                          pw.SizedBox(height: 4),
+                          pw.Image(
+                            pw.MemoryImage(signatureImageBytes),
+                            width: 78,
+                            height: 27,
+                            fit: pw.BoxFit.contain,
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                  pw.SizedBox(width: 12),
+                  pw.Expanded(
+                    child: _pdfField('Total \$', _money(equivalent.amount)),
+                  ),
+                ],
+              ),
+              pw.SizedBox(height: 9),
+              pw.Text(
+                equivalent.paymentStatus == 'paid'
+                    ? 'Firmado y pago registrado.'
+                    : equivalent.status == 'acknowledged'
+                    ? 'Recibido por la farmacia.'
+                    : equivalent.status == 'signed'
+                    ? 'Firmado por el domiciliario.'
+                    : 'Pendiente de firma del domiciliario.',
+                style: const pw.TextStyle(
+                  fontSize: 7,
+                  color: pdf.PdfColors.blueGrey700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    final bytes = await document.save();
+    if (!mounted) return;
+    await Printing.layoutPdf(
+      onLayout: (_) async => bytes,
+      name: 'equivalente-${equivalent.id.substring(0, 8)}.pdf',
+    );
+  }
+
+  pw.Widget _pdfField(String label, String value) => pw.Column(
+    crossAxisAlignment: pw.CrossAxisAlignment.start,
+    children: [
+      pw.Text(
+        label.toUpperCase(),
+        style: const pw.TextStyle(
+          fontSize: 6,
+          color: pdf.PdfColors.blueGrey600,
+        ),
+      ),
+      pw.SizedBox(height: 3),
+      pw.Text(
+        value,
+        style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold),
+      ),
+    ],
+  );
+
+  pw.Widget _pdfLine(String label, String value) => pw.Container(
+    padding: const pw.EdgeInsets.symmetric(vertical: 7),
+    decoration: const pw.BoxDecoration(
+      border: pw.Border(
+        bottom: pw.BorderSide(color: pdf.PdfColors.blueGrey200),
+      ),
+    ),
+    child: pw.Row(
+      children: [
+        pw.SizedBox(
+          width: 62,
+          child: pw.Text(
+            label,
+            style: const pw.TextStyle(
+              fontSize: 6,
+              color: pdf.PdfColors.blueGrey600,
+            ),
+          ),
+        ),
+        pw.Expanded(
+          child: pw.Text(
+            value,
+            style: pw.TextStyle(fontSize: 8, fontWeight: pw.FontWeight.bold),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  Uint8List? _signatureImageBytes(String? dataUrl) {
+    if (dataUrl == null || dataUrl.isEmpty) return null;
+    final separator = dataUrl.indexOf(',');
+    if (separator < 0 || separator == dataUrl.length - 1) return null;
+    try {
+      return base64Decode(dataUrl.substring(separator + 1));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _downloadImage(DeliveryEquivalent equivalent) async {
+    try {
+      final renderObject = _receiptKey.currentContext?.findRenderObject();
+      if (renderObject is! RenderRepaintBoundary) {
+        throw StateError(
+          'El equivalente todavía no está listo para capturarse.',
+        );
+      }
+      final image = await renderObject.toImage(pixelRatio: 3);
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) throw StateError('No se pudo generar la imagen.');
+      final bytes = byteData.buffer.asUint8List();
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [
+            XFile.fromData(
+              bytes,
+              mimeType: 'image/png',
+              name: 'equivalente-${equivalent.id.substring(0, 8)}.png',
+            ),
+          ],
+          text:
+              'Equivalente ${_invoiceNumber(equivalent)} · JR Mensajería Express',
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text('No se pudo generar la imagen: $error')),
+        );
+    }
+  }
+
+  Widget _receiptField(String label, String value, {Color? valueColor}) =>
+      Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label.toUpperCase(),
+            style: const TextStyle(
+              color: AppColors.muted,
+              fontSize: 7,
+              fontWeight: FontWeight.w900,
+              letterSpacing: .35,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            value,
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: valueColor ?? AppColors.ink,
+              fontSize: 9,
+              height: 1.25,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      );
+
+  Widget _receiptLine(String label, String value) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 5),
+    child: Row(
+      children: [
+        SizedBox(
+          width: 62,
+          child: Text(
+            label,
+            style: const TextStyle(
+              color: AppColors.muted,
+              fontSize: 8,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: const TextStyle(
+              color: AppColors.ink,
+              fontSize: 9,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+
+  @override
+  void dispose() {
+    _signaturePadController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final equivalent = _equivalent;
+    final signatureExpired =
+        equivalent != null && _signatureWindowExpired(equivalent);
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Expanded(
+                  child: Text(
+                    'Equivalente digital',
+                    style: TextStyle(
+                      color: AppColors.ink,
+                      fontSize: 21,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Actualizar equivalente',
+                  onPressed: _loading ? null : _loadEquivalent,
+                  icon: const Icon(Icons.refresh_rounded),
+                ),
+              ],
+            ),
+            const Text(
+              'Soporte real del servicio, guardado en Supabase para ambas partes.',
+              style: TextStyle(
+                color: AppColors.muted,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 14),
+            if (_loading)
+              const Expanded(child: Center(child: CircularProgressIndicator()))
+            else if (_error != null)
+              Expanded(
+                child: Center(
+                  child: Text(
+                    _error!,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: AppColors.danger),
+                  ),
+                ),
+              )
+            else if (equivalent == null)
+              const Expanded(
+                child: Center(
+                  child: Text(
+                    'El equivalente se habilitará cuando la entrega quede guardada como entregada.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: AppColors.muted),
+                  ),
+                ),
+              )
+            else
+              Expanded(
+                child: ListView(
+                  children: [
+                    RepaintBoundary(
+                      key: _receiptKey,
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(13),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: const Color(0xFF9FB5C8)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                Image.asset(
+                                  'assets/jr-mensajeria-express.png',
+                                  width: 76,
+                                  height: 48,
+                                  fit: BoxFit.contain,
+                                ),
+                                const SizedBox(width: 7),
+                                const Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        'JR Mensajería Express',
+                                        style: TextStyle(
+                                          color: AppColors.ink,
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.w900,
+                                        ),
+                                      ),
+                                      SizedBox(height: 3),
+                                      Text(
+                                        '324 660 2056',
+                                        style: TextStyle(
+                                          color: AppColors.muted,
+                                          fontSize: 8,
+                                          fontWeight: FontWeight.w700,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    border: Border.all(color: AppColors.line),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: Column(
+                                    children: [
+                                      const Text(
+                                        'No.',
+                                        style: TextStyle(
+                                          color: AppColors.muted,
+                                          fontSize: 7,
+                                          fontWeight: FontWeight.w800,
+                                        ),
+                                      ),
+                                      Text(
+                                        _invoiceNumber(equivalent),
+                                        style: const TextStyle(
+                                          color: AppColors.ink,
+                                          fontSize: 8,
+                                          fontWeight: FontWeight.w900,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const Divider(height: 16),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: _receiptField(
+                                    'Fecha',
+                                    _dateLabel(equivalent.createdAt),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: _receiptField(
+                                    'Valor \$',
+                                    _money(equivalent.amount),
+                                    valueColor: AppColors.primaryDark,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const Divider(height: 16),
+                            _receiptLine(
+                              'Recibo de',
+                              formatPharmacyDisplay(equivalent.pharmacyCode),
+                            ),
+                            const SizedBox(height: 10),
+                            const Text(
+                              'POR CONCEPTO DE',
+                              style: TextStyle(
+                                color: AppColors.muted,
+                                fontSize: 7,
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: .4,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              _concept(equivalent),
+                              style: const TextStyle(
+                                color: AppColors.ink,
+                                fontSize: 10,
+                                height: 1.3,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 25),
+                            const Divider(height: 1),
+                            const SizedBox(height: 9),
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.end,
+                              children: [
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      _receiptField(
+                                        'Firma',
+                                        equivalent.courierSignatureName ??
+                                            'Pendiente de firma',
+                                      ),
+                                      if (_signatureImageBytes(
+                                            equivalent.courierSignatureImage,
+                                          )
+                                          case final signatureBytes?) ...[
+                                        const SizedBox(height: 5),
+                                        Image.memory(
+                                          signatureBytes,
+                                          width: 105,
+                                          height: 34,
+                                          fit: BoxFit.contain,
+                                          alignment: Alignment.centerLeft,
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: _receiptField(
+                                    'Total \$',
+                                    _money(equivalent.amount),
+                                    valueColor: AppColors.primaryDark,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: equivalent.status == 'draft'
+                            ? const Color(0xFFFFF8E8)
+                            : AppColors.mint,
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: equivalent.status == 'draft'
+                              ? AppColors.warning.withValues(alpha: .3)
+                              : AppColors.primary.withValues(alpha: .2),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            equivalent.status == 'draft'
+                                ? Icons.lock_clock_outlined
+                                : Icons.verified_outlined,
+                            color: equivalent.status == 'draft'
+                                ? AppColors.warning
+                                : AppColors.primaryDark,
+                          ),
+                          const SizedBox(width: 9),
+                          Expanded(
+                            child: Text(
+                              equivalent.paymentStatus == 'paid'
+                                  ? 'Firmado y pago registrado. El soporte quedó liquidado.'
+                                  : equivalent.status == 'draft'
+                                  ? signatureExpired
+                                        ? 'Venció el plazo de seis días para firmar. El soporte se conserva como pendiente.'
+                                        : 'Pendiente por firmar. No se envía a la farmacia ni suma a tus ganancias. Puedes firmarlo hasta ${_dateLabel(equivalent.createdAt.add(const Duration(days: 6)))}.'
+                                  : equivalent.status == 'acknowledged'
+                                  ? 'Firmado y recibido por la farmacia.'
+                                  : 'Firmado. Ya puede verlo la farmacia; el pago queda pendiente de liquidación.',
+                              style: const TextStyle(
+                                color: AppColors.ink,
+                                fontSize: 11,
+                                height: 1.3,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    if (equivalent.status == 'draft' && signatureExpired)
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFFF0EF),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Text(
+                          'Ya pasaron seis días desde la entrega. El sistema conserva el registro, pero ya no permite firmarlo.',
+                          style: TextStyle(
+                            color: AppColors.danger,
+                            fontSize: 11,
+                            height: 1.35,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      )
+                    else if (equivalent.status == 'draft') ...[
+                      const Text(
+                        'Firma manuscrita',
+                        style: TextStyle(
+                          color: AppColors.ink,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      Container(
+                        height: 128,
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: AppColors.line),
+                        ),
+                        clipBehavior: Clip.antiAlias,
+                        child: Signature(
+                          controller: _signaturePadController,
+                          backgroundColor: Colors.white,
+                          placeholder: const Center(
+                            child: Text(
+                              'Firma aquí con el dedo',
+                              style: TextStyle(
+                                color: AppColors.muted,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton.icon(
+                          onPressed: _saving
+                              ? null
+                              : () => setState(_signaturePadController.clear),
+                          icon: const Icon(Icons.delete_outline_rounded),
+                          label: const Text('Borrar firma'),
+                        ),
+                      ),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton.icon(
+                          onPressed: _saving ? null : _signEquivalent,
+                          icon: _saving
+                              ? const SizedBox(
+                                  width: 17,
+                                  height: 17,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : const Icon(Icons.draw_rounded),
+                          label: Text(
+                            _saving ? 'Guardando firma…' : 'Firmar equivalente',
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    SizedBox(
+                      width: double.infinity,
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: () => _downloadPdf(equivalent),
+                              icon: const Icon(Icons.picture_as_pdf_outlined),
+                              label: const Text('Descargar PDF'),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              onPressed: () => _downloadImage(equivalent),
+                              icon: const Icon(Icons.image_outlined),
+                              label: const Text('Descargar imagen'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _DetailSheet extends StatelessWidget {
   const _DetailSheet({
     required this.delivery,
     required this.action,
+    required this.advancing,
     required this.onAdvance,
     required this.onOrigin,
     required this.onDestination,
@@ -9784,10 +16163,13 @@ class _DetailSheet extends StatelessWidget {
     required this.onCallClient,
     required this.onCashReceived,
     required this.onPickupStop,
+    required this.onChat,
+    required this.onEquivalent,
   });
 
   final Delivery delivery;
   final String action;
+  final bool advancing;
   final VoidCallback onAdvance;
   final VoidCallback onOrigin;
   final VoidCallback onDestination;
@@ -9795,6 +16177,8 @@ class _DetailSheet extends StatelessWidget {
   final VoidCallback onCallClient;
   final VoidCallback onCashReceived;
   final ValueChanged<DeliveryPickupStop> onPickupStop;
+  final VoidCallback onChat;
+  final VoidCallback onEquivalent;
 
   @override
   Widget build(BuildContext context) {
@@ -9884,6 +16268,65 @@ class _DetailSheet extends StatelessWidget {
           const SizedBox(height: 18),
           _Progress(status: delivery.status),
           const SizedBox(height: 16),
+          Material(
+            color: AppColors.pharmacyBlueSoft,
+            borderRadius: BorderRadius.circular(18),
+            child: InkWell(
+              onTap: onChat,
+              borderRadius: BorderRadius.circular(18),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(13, 12, 12, 12),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: .82),
+                        borderRadius: BorderRadius.circular(13),
+                      ),
+                      child: const Icon(
+                        Icons.chat_bubble_rounded,
+                        color: AppColors.primaryDark,
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    const Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Chat con la farmacia',
+                            style: TextStyle(
+                              color: AppColors.primaryDark,
+                              fontSize: 13,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          SizedBox(height: 2),
+                          Text(
+                            'Coordina el servicio desde este domicilio',
+                            style: TextStyle(
+                              color: AppColors.muted,
+                              fontSize: 10.5,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Icon(
+                      Icons.arrow_forward_ios_rounded,
+                      color: AppColors.primaryDark,
+                      size: 15,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
           _DetailCard(
             title: 'Servicio solicitado',
             icon: delivery.service.hasDataphone
@@ -10307,16 +16750,29 @@ class _DetailSheet extends StatelessWidget {
             )
           else
             FilledButton.icon(
-              onPressed: onAdvance,
+              onPressed: advancing ? null : onAdvance,
               icon: Icon(
-                delivery.status == DeliveryStatus.accepted
+                advancing
+                    ? Icons.hourglass_top_rounded
+                    : delivery.status == DeliveryStatus.accepted
                     ? Icons.inventory_2_outlined
                     : delivery.status == DeliveryStatus.pickedUp
                     ? Icons.check_rounded
                     : Icons.handshake_outlined,
               ),
-              label: Text(action),
+              label: Text(advancing ? 'Guardando…' : action),
             ),
+          if (done) ...[
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: onEquivalent,
+                icon: const Icon(Icons.receipt_long_outlined),
+                label: const Text('Ver y firmar equivalente'),
+              ),
+            ),
+          ],
           const SizedBox(height: 10),
           Center(
             child: Text(
@@ -11756,6 +18212,31 @@ class _TypePill extends StatelessWidget {
           ),
         ),
       ],
+    ),
+  );
+}
+
+class _AssignmentPill extends StatelessWidget {
+  const _AssignmentPill({required this.support});
+
+  final bool support;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+    decoration: BoxDecoration(
+      color: support
+          ? AppColors.violet.withValues(alpha: .11)
+          : AppColors.primary.withValues(alpha: .11),
+      borderRadius: BorderRadius.circular(9),
+    ),
+    child: Text(
+      support ? 'Apoyo' : 'Base',
+      style: TextStyle(
+        color: support ? AppColors.violet : AppColors.primaryDark,
+        fontSize: 10,
+        fontWeight: FontWeight.w900,
+      ),
     ),
   );
 }

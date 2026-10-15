@@ -1,0 +1,79 @@
+name: Publicar web de farmacias
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pharmacy_web/**'
+      - 'lib/**'
+      - 'web/**'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - '.github/workflows/pharmacy-web-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Descargar código
+        uses: actions/checkout@v4
+      - name: Configurar Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version-file: pubspec.yaml
+          cache: true
+      - name: Instalar dependencias Flutter
+        run: flutter pub get
+      - name: Construir aplicación web de domiciliarios
+        env:
+          SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+          FIREBASE_WEB_VAPID_KEY: ${{ secrets.VITE_WEB_PUSH_PUBLIC_KEY }}
+        run: |
+          flutter build web --release \
+            --base-href=/farmanorte-pharmacy-web/courier/ \
+            --dart-define=SUPABASE_URL="$SUPABASE_URL" \
+            --dart-define=SUPABASE_PUBLISHABLE_KEY="$SUPABASE_PUBLISHABLE_KEY" \
+            --dart-define=FIREBASE_WEB_VAPID_KEY="$FIREBASE_WEB_VAPID_KEY"
+          mkdir -p pharmacy_web/public/courier
+          cp -a build/web/. pharmacy_web/public/courier/
+      - name: Configurar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: pharmacy_web/package-lock.json
+      - name: Instalar dependencias
+        working-directory: pharmacy_web
+        run: npm ci
+      - name: Construir web
+        working-directory: pharmacy_web
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+          VITE_WEB_PUSH_PUBLIC_KEY: ${{ secrets.VITE_WEB_PUSH_PUBLIC_KEY }}
+        run: npm run build
+      - name: Preparar GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Subir artefacto
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pharmacy_web/dist
+      - name: Publicar
+        id: deployment
+        uses: actions/deploy-pages@v4
+

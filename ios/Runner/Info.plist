@@ -53,6 +53,12 @@
 	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>FarmaNorte usa tu ubicación para mostrarte en el mapa y asignarte domicilios cercanos.</string>
+	<key>NSUserNotificationsUsageDescription</key>
+	<string>FarmaNorte necesita avisarte cuando llegue un domicilio o un mensaje de la farmacia.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

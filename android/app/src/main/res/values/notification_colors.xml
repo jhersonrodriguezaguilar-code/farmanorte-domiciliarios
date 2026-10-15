@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Azul de marca farmanorte para el ícono de notificaciones. -->
+    <color name="farmanorte_notification">#003399</color>
+</resources>

@@ -13,7 +13,7 @@ Entregar una página web estática, preparada para Hostinger, desde la que un us
 - Búsqueda de cliente por número de documento dentro de la farmacia.
 - Guardado real del cliente y sus múltiples direcciones en Supabase; permite
   seleccionar una dirección existente o registrar otra.
-- Oferta con vencimiento de tres minutos (`expires_at`).
+- Oferta con vencimiento de cinco minutos (`expires_at`). La ventana limita la aceptación automática; la farmacia conserva la opción de asignar manualmente después.
 - Historial real de la farmacia.
 - Actualización Realtime de domicilios de la farmacia.
 - Auditoría automática de `INSERT` y `UPDATE` en `delivery_events` mediante trigger de base de datos.

@@ -1,9 +1,11 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Origin': Deno.env.get('FARMANORTE_WEB_ORIGIN')
+    ?? 'https://jhersonrodriguezaguilar-code.github.io',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Vary': 'Origin',
 };
 
 const json = (body: Record<string, unknown>, status = 200) =>
@@ -85,5 +87,22 @@ Deno.serve(async (request) => {
     return json({ error: `No se pudo actualizar la contraseña: ${updateError.message}` }, 400);
   }
 
-  return json({ ok: true });
+  const { error: profileUpdateError } = await adminClient
+    .from('profiles')
+    .update({ must_change_password: true, password_changed_at: null })
+    .eq('id', userId);
+  if (profileUpdateError) {
+    return json({ error: `La contraseña cambió, pero no se pudo marcar como temporal: ${profileUpdateError.message}` }, 500);
+  }
+
+  const { error: auditError } = await adminClient.from('admin_audit_log').insert({
+    actor_id: authData.user.id,
+    action: 'password_reset',
+    target_user_id: userId,
+    target_table: 'profiles',
+    metadata: { must_change_password: true },
+  });
+  if (auditError) console.warn('No se pudo escribir la bitácora de restablecimiento:', auditError.message);
+
+  return json({ ok: true, temporary_password: password });
 });
