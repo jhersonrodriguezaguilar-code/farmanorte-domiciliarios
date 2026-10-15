@@ -59,9 +59,11 @@ type PushEvent =
   | 'delivery_support_release'
   | 'chat_message';
 
-// Quién recibe un domicilio nuevo: la zona del recorrido durante la reserva y
-// los apoyos cuando la reserva termina.
-type CourierAudience = 'zone' | 'support' | 'all';
+// Quién recibe un domicilio nuevo (migración 041):
+// - home: domiciliarios de zona de la farmacia que pide (reserva de 3 min).
+// - release: las demás zonas del recorrido y los apoyos, al terminar la reserva.
+// - all: todos los anteriores.
+type CourierAudience = 'home' | 'release' | 'all';
 
 const priorityActive = (delivery: DeliveryRow) =>
   Boolean(delivery.priority_until) &&
@@ -243,7 +245,11 @@ const eligibleCourierIds = async (
 ) => {
   const pharmacyCodes = deliveryRoutePharmacyCodes(delivery);
   const routeZoneIds = new Set<string>();
-  if (delivery.zone_id) routeZoneIds.add(delivery.zone_id);
+  const homeZoneIds = new Set<string>();
+  if (delivery.zone_id) {
+    routeZoneIds.add(delivery.zone_id);
+    homeZoneIds.add(delivery.zone_id);
+  }
 
   if (pharmacyCodes.length > 0) {
     const { data: routePharmacies, error: routeError } = await adminClient
@@ -252,7 +258,11 @@ const eligibleCourierIds = async (
       .in('pharmacy_code', pharmacyCodes);
     if (routeError) throw new Error(`No se pudieron determinar las zonas del recorrido: ${routeError.message}`);
     for (const row of routePharmacies ?? []) {
-      if (row.zone_id) routeZoneIds.add(String(row.zone_id));
+      if (!row.zone_id) continue;
+      routeZoneIds.add(String(row.zone_id));
+      if (String(row.pharmacy_code).trim() === String(delivery.pharmacy_code).trim()) {
+        homeZoneIds.add(String(row.zone_id));
+      }
     }
   }
 
@@ -265,15 +275,17 @@ const eligibleCourierIds = async (
   const courierIds = new Set<string>();
   for (const row of data ?? []) {
     const isSupport = row.assignment_type === 'support';
+    const zoneId = row.zone_id ? String(row.zone_id) : '';
     // Apoyo general (sin zona) o apoyo de una zona del recorrido.
-    const supportCovers = isSupport &&
-      (!row.zone_id || routeZoneIds.has(String(row.zone_id)));
-    const zoneCovers = !isSupport && row.zone_id && routeZoneIds.has(String(row.zone_id));
-    const include = audience === 'zone'
-      ? zoneCovers
-      : audience === 'support'
-      ? supportCovers
-      : zoneCovers || supportCovers;
+    const supportCovers = isSupport && (!zoneId || routeZoneIds.has(zoneId));
+    const homeCovers = !isSupport && Boolean(zoneId) && homeZoneIds.has(zoneId);
+    const otherRouteCovers = !isSupport && Boolean(zoneId) &&
+      routeZoneIds.has(zoneId) && !homeZoneIds.has(zoneId);
+    const include = audience === 'home'
+      ? homeCovers
+      : audience === 'release'
+      ? otherRouteCovers || supportCovers
+      : homeCovers || otherRouteCovers || supportCovers;
     if (include && row.courier_id) courierIds.add(String(row.courier_id));
   }
   if (courierIds.size === 0) return [];
@@ -307,11 +319,11 @@ const targetUserIds = async ({
     const courierIds = await eligibleCourierIds(
       adminClient,
       delivery,
-      priorityActive(delivery) ? 'zone' : 'all',
+      priorityActive(delivery) ? 'home' : 'all',
     );
     courierIds.forEach((id) => targetIds.add(id));
   } else if (event === 'delivery_support_release') {
-    const courierIds = await eligibleCourierIds(adminClient, delivery, 'support');
+    const courierIds = await eligibleCourierIds(adminClient, delivery, 'release');
     courierIds.forEach((id) => targetIds.add(id));
   } else if (event === 'delivery_assigned') {
     if (delivery.accepted_courier_id) targetIds.add(delivery.accepted_courier_id);
@@ -633,7 +645,7 @@ Deno.serve(async (request) => {
     : isAssignment
       ? 'Nuevo domicilio asignado'
       : isSupportRelease
-        ? 'Domicilio disponible para apoyo'
+        ? 'Domicilio disponible para ti'
         : 'Nuevo domicilio disponible';
   const compactCode = (delivery.public_code ?? '').replace(/[\s_-]+/g, '').toUpperCase();
   const pharmacyLabel = `farmanorte ${delivery.pharmacy_code}`;

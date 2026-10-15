@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:audioplayers/audioplayers.dart';
@@ -1845,6 +1846,8 @@ class RealtimeOperationsService {
       assignedAsSupport: data['assignedAsSupport'] == true,
       acceptedCourierId: data['acceptedCourierId']?.toString(),
       deliveryOutcome: data['deliveryOutcome']?.toString(),
+      priorityUntil: DateTime.tryParse('${data['priorityUntil'] ?? ''}'),
+      expiresAt: DateTime.tryParse('${data['expiresAt'] ?? ''}'),
     );
   }
 
@@ -2944,6 +2947,8 @@ class SupabaseOperationsService {
             'acceptedCourierId': row['accepted_courier_id'],
             'assignedAsSupport': row['assigned_as_support'],
             'deliveryOutcome': row['delivery_outcome'],
+            'priorityUntil': row['priority_until'],
+            'expiresAt': row['expires_at'],
           };
           return RealtimeOperationsService.instance._deliveryFromMap(
             '${row['id']}',
@@ -3750,6 +3755,8 @@ class Delivery {
     this.assignedAsSupport = false,
     this.acceptedCourierId,
     this.deliveryOutcome,
+    this.priorityUntil,
+    this.expiresAt,
   });
 
   final String id;
@@ -3786,6 +3793,9 @@ class Delivery {
   final bool assignedAsSupport;
   final String? acceptedCourierId;
   final String? deliveryOutcome;
+  // Migración 039/041: reserva para la zona que pide y vencimiento de la oferta.
+  final DateTime? priorityUntil;
+  final DateTime? expiresAt;
 
   double get serviceFee =>
       courierEarnings > 0 ? courierEarnings : service.fee.toDouble();
@@ -3852,6 +3862,8 @@ class Delivery {
     assignedAsSupport: assignedAsSupport ?? this.assignedAsSupport,
     acceptedCourierId: acceptedCourierId ?? this.acceptedCourierId,
     deliveryOutcome: deliveryOutcome ?? this.deliveryOutcome,
+    priorityUntil: priorityUntil,
+    expiresAt: expiresAt,
   );
 }
 
@@ -13612,19 +13624,29 @@ class _HomeTopBar extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  inBackground
-                      ? 'En segundo plano'
-                      : connected
-                      ? 'Conectado'
-                      : 'Desconectado',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: AppColors.ink,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
-                  ),
+                Row(
+                  children: [
+                    if (connected && !inBackground) ...[
+                      const _LiveDot(),
+                      const SizedBox(width: 6),
+                    ],
+                    Flexible(
+                      child: Text(
+                        inBackground
+                            ? 'En segundo plano'
+                            : connected
+                            ? 'Conectado'
+                            : 'Desconectado',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: AppColors.ink,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
                 Text(
                   inBackground
@@ -14455,7 +14477,7 @@ class DeliveryListItem extends StatelessWidget {
     final active = delivery.status != DeliveryStatus.offered;
     final overflow = delivery.kind == DeliveryKind.overflow;
 
-    return Card(
+    final card = Card(
       child: InkWell(
         onTap: active ? onPressed : null,
         borderRadius: BorderRadius.circular(22),
@@ -14484,6 +14506,10 @@ class DeliveryListItem extends StatelessWidget {
                   _StatusPill(status: delivery.status),
                 ],
               ),
+              if (!active && delivery.expiresAt != null) ...[
+                const SizedBox(height: 10),
+                _OfferCountdown(delivery: delivery),
+              ],
               const SizedBox(height: 8),
               Wrap(
                 spacing: 8,
@@ -14664,6 +14690,228 @@ class DeliveryListItem extends StatelessWidget {
           ),
         ),
       ),
+    );
+    final live =
+        !active &&
+        delivery.expiresAt != null &&
+        delivery.expiresAt!.isAfter(DateTime.now());
+    return _LiveEntrance(child: live ? _LiveOfferFrame(child: card) : card);
+  }
+}
+
+/// Punto verde que late mientras el domiciliario está conectado.
+class _LiveDot extends StatefulWidget {
+  const _LiveDot();
+
+  @override
+  State<_LiveDot> createState() => _LiveDotState();
+}
+
+class _LiveDotState extends State<_LiveDot>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ping = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1000),
+  );
+  Timer? _beat;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _beat?.cancel();
+    if (MediaQuery.of(context).disableAnimations) return;
+    _beat = Timer.periodic(const Duration(milliseconds: 2200), (_) {
+      if (mounted) _ping.forward(from: 0);
+    });
+  }
+
+  @override
+  void dispose() {
+    _beat?.cancel();
+    _ping.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: _ping,
+    builder: (context, _) => Container(
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(
+        color: AppColors.success,
+        shape: BoxShape.circle,
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.success.withValues(alpha: .45 * (1 - _ping.value)),
+            spreadRadius: 6 * _ping.value,
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// Entrada suave de cada tarjeta la primera vez que aparece.
+class _LiveEntrance extends StatelessWidget {
+  const _LiveEntrance({required this.child});
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (MediaQuery.of(context).disableAnimations) return child;
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 380),
+      curve: Curves.easeOutCubic,
+      child: child,
+      builder: (context, value, child) => Opacity(
+        opacity: value,
+        child: Transform.translate(
+          offset: Offset(0, (1 - value) * 14),
+          child: child,
+        ),
+      ),
+    );
+  }
+}
+
+/// Oferta viva: el borde late en azul mientras el domicilio está publicado.
+class _LiveOfferFrame extends StatefulWidget {
+  const _LiveOfferFrame({required this.child});
+  final Widget child;
+
+  @override
+  State<_LiveOfferFrame> createState() => _LiveOfferFrameState();
+}
+
+class _LiveOfferFrameState extends State<_LiveOfferFrame>
+    with SingleTickerProviderStateMixin {
+  // Un latido corto cada 1,8 s (no una animación infinita): así la interfaz
+  // queda quieta entre latidos y respeta "reducir movimiento".
+  late final AnimationController _pulse = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 900),
+  );
+  Timer? _beat;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _beat?.cancel();
+    if (MediaQuery.of(context).disableAnimations) return;
+    _beat = Timer.periodic(const Duration(milliseconds: 1800), (_) {
+      if (mounted) _pulse.forward(from: 0);
+    });
+  }
+
+  @override
+  void dispose() {
+    _beat?.cancel();
+    _pulse.dispose();
+    super.dispose();
+  }
+
+  double get _glow => math.sin(_pulse.value * math.pi);
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: _pulse,
+    child: widget.child,
+    builder: (context, child) => DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: AppColors.primary, width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primary.withValues(alpha: .06 + _glow * .14),
+            blurRadius: 4 + _glow * 10,
+            spreadRadius: _glow * 3,
+          ),
+        ],
+      ),
+      child: child,
+    ),
+  );
+}
+
+/// Anillo con el tiempo que queda: primero la reserva para la zona que pide,
+/// luego el tiempo para el resto del recorrido y el apoyo.
+class _OfferCountdown extends StatefulWidget {
+  const _OfferCountdown({required this.delivery});
+  final Delivery delivery;
+
+  @override
+  State<_OfferCountdown> createState() => _OfferCountdownState();
+}
+
+class _OfferCountdownState extends State<_OfferCountdown> {
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final now = DateTime.now();
+    final priority = widget.delivery.priorityUntil?.toLocal();
+    final expires = widget.delivery.expiresAt!.toLocal();
+    final inPriority = priority != null && priority.isAfter(now);
+    final end = inPriority ? priority : expires;
+    final start = inPriority
+        ? end.subtract(const Duration(minutes: 3))
+        : (priority ?? end.subtract(const Duration(minutes: 5)));
+    final remaining = end.difference(now);
+    final total = end.difference(start).inMilliseconds;
+    final expired = remaining.isNegative || remaining == Duration.zero;
+    final fraction = expired || total <= 0
+        ? 0.0
+        : (remaining.inMilliseconds / total).clamp(0.0, 1.0);
+    final minutes = expired ? 0 : remaining.inMinutes;
+    final seconds = expired
+        ? '00'
+        : (remaining.inSeconds % 60).toString().padLeft(2, '0');
+    final label = expired
+        ? 'Oferta vencida'
+        : inPriority
+        ? 'Reservado para la zona que pide · $minutes:$seconds'
+        : 'Abierto al recorrido y apoyo · $minutes:$seconds';
+    return Row(
+      children: [
+        SizedBox(
+          width: 26,
+          height: 26,
+          child: CircularProgressIndicator(
+            value: fraction,
+            strokeWidth: 3.5,
+            backgroundColor: AppColors.mint,
+            color: expired ? AppColors.warning : AppColors.primary,
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: expired ? AppColors.muted : AppColors.primary,
+              fontSize: 12,
+              fontWeight: FontWeight.w800,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
