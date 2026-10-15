@@ -75,3 +75,4 @@ pharmacy_web/public/courier/*
 
 # Configuración de Firebase del proyecto real (se inyecta fuera del repo)
 android/app/google-services.json
+/android/.kotlin/
