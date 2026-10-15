@@ -230,6 +230,24 @@ class AppNotificationAudio {
     await preferences.setDouble(_volumePreferenceKey, _volume);
   }
 
+  static bool _webAudioUnlocked = false;
+
+  /// iPhone bloquea el audio de la PWA hasta que suene algo dentro de un
+  /// toque. Se llama al iniciar sesión y al tocar "Activar" para que las
+  /// alertas con la app abierta suenen después.
+  static void unlockForWeb() {
+    if (!kIsWeb || _webAudioUnlocked) return;
+    _webAudioUnlocked = true;
+    unawaited(() async {
+      try {
+        await _player.play(AssetSource(selectedSound.assetPath), volume: 0);
+        await _player.stop();
+      } catch (_) {
+        _webAudioUnlocked = false;
+      }
+    }());
+  }
+
   static Future<void> playDeliveryAlert() => _play(selectedSound.assetPath);
 
   static Future<void> playMessageAlert() => _play(messageSound.assetPath);
@@ -674,6 +692,58 @@ class BackgroundNotificationService {
     }
   }
 
+  /// Solo PWA: falso cuando el navegador no admite push. En iPhone pasa si la
+  /// PWA no se abrió desde el ícono de la pantalla de inicio.
+  static final webPushSupported = ValueNotifier<bool>(true);
+
+  /// Solo PWA: deja Firebase listo antes del toque en "Activar", para que la
+  /// solicitud de permiso ocurra dentro del gesto del usuario.
+  static Future<void> prepareWebPush() async {
+    if (!kIsWeb || !FirebaseConfig.messagingConfigured) return;
+    try {
+      if (!await _ensureFirebase()) return;
+      webPushSupported.value = await FirebaseMessaging.instance.isSupported();
+      await refreshPermissionStatus();
+    } catch (error) {
+      debugPrint('Notificaciones: no se preparó el push web: $error');
+    }
+  }
+
+  /// Botón "Activar". En Android abre los ajustes de la app; en la PWA pide
+  /// el permiso del navegador, que iPhone solo muestra tras un toque.
+  static Future<bool> enableFromUserTap() async {
+    if (!kIsWeb) return openNotificationSettings();
+    AppNotificationAudio.unlockForWeb();
+    if (!FirebaseConfig.messagingConfigured ||
+        FirebaseConfig.webVapidKey.trim().isEmpty) {
+      return false;
+    }
+    try {
+      if (!await _ensureFirebase()) return false;
+      final settings = await FirebaseMessaging.instance.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+      final granted =
+          settings.authorizationStatus == AuthorizationStatus.authorized ||
+          settings.authorizationStatus == AuthorizationStatus.provisional;
+      _askedThisSession = true;
+      permissionStatus.value = granted
+          ? NotificationPermissionStatus.granted
+          : NotificationPermissionStatus.denied;
+      if (granted &&
+          SupabaseConfig.isConfigured &&
+          SupabaseOperationsService.instance.hasAuthenticatedUser) {
+        await registerForCurrentUser();
+      }
+      return granted;
+    } catch (error) {
+      debugPrint('Notificaciones: no se pudo activar el push web: $error');
+      return false;
+    }
+  }
+
   /// Lee el permiso actual sin mostrar ningún diálogo.
   static Future<NotificationPermissionStatus> refreshPermissionStatus() async {
     var status = NotificationPermissionStatus.unknown;
@@ -743,6 +813,9 @@ class BackgroundNotificationService {
         unawaited(initialize());
         return true;
       }
+      // En la PWA el navegador solo muestra el diálogo tras un toque (iPhone
+      // ignora cualquier otra solicitud); lo pide el botón "Activar".
+      if (kIsWeb) return false;
       // Un mismo arranque no insiste con el diálogo: si el usuario lo negó,
       // la app muestra el aviso con el botón para abrir los ajustes.
       if (_askedThisSession) return false;
@@ -1067,6 +1140,7 @@ class _NotificationPermissionBannerState
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    if (kIsWeb) unawaited(BackgroundNotificationService.prepareWebPush());
   }
 
   @override
@@ -1098,72 +1172,106 @@ class _NotificationPermissionBannerState
 
   @override
   Widget build(BuildContext context) {
-    final showBanner =
+    final isAndroidApp =
         !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
-    if (!showBanner) return widget.child;
-    return ValueListenableBuilder<NotificationPermissionStatus>(
-      valueListenable: BackgroundNotificationService.permissionStatus,
-      child: widget.child,
-      builder: (context, status, child) {
-        final visible =
-            status == NotificationPermissionStatus.denied && !_dismissed;
-        if (!visible) return child!;
-        return Column(
-          children: [
-            Expanded(child: child!),
-            Material(
-              color: AppColors.primary,
-              child: SafeArea(
-                top: false,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
-                  child: Row(
-                    children: [
-                      const Icon(
-                        Icons.notifications_off_outlined,
-                        color: Colors.white,
-                        size: 22,
-                      ),
-                      const SizedBox(width: 10),
-                      const Expanded(
-                        child: Text(
-                          'Las notificaciones están desactivadas. Actívalas '
-                          'para recibir domicilios nuevos y asignados.',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 12.5,
-                            height: 1.3,
-                            fontWeight: FontWeight.w700,
-                          ),
+    final isWebPush = kIsWeb && FirebaseConfig.messagingConfigured;
+    if (!isAndroidApp && !isWebPush) return widget.child;
+    final isIphone = defaultTargetPlatform == TargetPlatform.iOS;
+    return ValueListenableBuilder<bool>(
+      valueListenable: BackgroundNotificationService.webPushSupported,
+      builder: (context, webSupported, _) =>
+          ValueListenableBuilder<NotificationPermissionStatus>(
+            valueListenable: BackgroundNotificationService.permissionStatus,
+            child: widget.child,
+            builder: (context, status, child) {
+              final visible =
+                  !_dismissed &&
+                  (isAndroidApp
+                      ? status == NotificationPermissionStatus.denied
+                      : status != NotificationPermissionStatus.granted);
+              if (!visible) return child!;
+              // En la PWA, iPhone solo admite push si se abre desde el ícono de la
+              // pantalla de inicio; en ese caso se explica cómo instalarla.
+              final needsInstall = isWebPush && !webSupported;
+              final message = needsInstall
+                  ? (isIphone
+                        ? 'Para recibir avisos en iPhone: toca Compartir → Agregar '
+                              'a pantalla de inicio y abre farmanorte desde ese ícono.'
+                        : 'Este navegador no admite notificaciones. Instala la app '
+                              'o usa Chrome.')
+                  : isWebPush && status == NotificationPermissionStatus.denied
+                  ? (isIphone
+                        ? 'Notificaciones bloqueadas. Actívalas en Ajustes → '
+                              'Notificaciones → farmanorte.'
+                        : 'Notificaciones bloqueadas. Permítelas en los permisos '
+                              'del sitio del navegador.')
+                  : isWebPush
+                  ? 'Activa las notificaciones para recibir domicilios nuevos y '
+                        'asignados aunque no tengas la app abierta.'
+                  : 'Las notificaciones están desactivadas. Actívalas '
+                        'para recibir domicilios nuevos y asignados.';
+              final showAction =
+                  isAndroidApp ||
+                  (!needsInstall &&
+                      status != NotificationPermissionStatus.denied);
+              return Column(
+                children: [
+                  Expanded(child: child!),
+                  Material(
+                    color: AppColors.primary,
+                    child: SafeArea(
+                      top: false,
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              Icons.notifications_off_outlined,
+                              color: Colors.white,
+                              size: 22,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                message,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12.5,
+                                  height: 1.3,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            if (showAction)
+                              TextButton(
+                                style: TextButton.styleFrom(
+                                  foregroundColor: Colors.white,
+                                ),
+                                onPressed: () => unawaited(
+                                  BackgroundNotificationService.enableFromUserTap(),
+                                ),
+                                child: const Text(
+                                  'Activar',
+                                  style: TextStyle(fontWeight: FontWeight.w900),
+                                ),
+                              ),
+                            IconButton(
+                              tooltip: 'Ocultar aviso',
+                              color: Colors.white70,
+                              iconSize: 18,
+                              onPressed: () =>
+                                  setState(() => _dismissed = true),
+                              icon: const Icon(Icons.close),
+                            ),
+                          ],
                         ),
                       ),
-                      TextButton(
-                        style: TextButton.styleFrom(
-                          foregroundColor: Colors.white,
-                        ),
-                        onPressed: () => unawaited(
-                          BackgroundNotificationService.openNotificationSettings(),
-                        ),
-                        child: const Text(
-                          'Activar',
-                          style: TextStyle(fontWeight: FontWeight.w900),
-                        ),
-                      ),
-                      IconButton(
-                        tooltip: 'Ocultar aviso',
-                        color: Colors.white70,
-                        iconSize: 18,
-                        onPressed: () => setState(() => _dismissed = true),
-                        icon: const Icon(Icons.close),
-                      ),
-                    ],
+                    ),
                   ),
-                ),
-              ),
-            ),
-          ],
-        );
-      },
+                ],
+              );
+            },
+          ),
     );
   }
 }
@@ -5231,6 +5339,7 @@ class _LoginScreenState extends State<LoginScreen>
 
   Future<void> _login() async {
     FocusManager.instance.primaryFocus?.unfocus();
+    AppNotificationAudio.unlockForWeb();
 
     if (!SupabaseConfig.isConfigured) {
       if (widget.allowLocalReview) {
@@ -13051,7 +13160,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           ? null
                           : TextButton(
                               onPressed: () => unawaited(
-                                BackgroundNotificationService.openNotificationSettings(),
+                                BackgroundNotificationService.enableFromUserTap(),
                               ),
                               child: const Text('Activar'),
                             ),
