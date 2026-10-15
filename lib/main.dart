@@ -56,6 +56,9 @@ class AppColors {
   static const line = Color(0xFFDCE6F3);
   static const warning = Color(0xFFF59E0B);
   static const danger = Color(0xFFE55353);
+  // Estados: verde solo para entregado, ámbar solo para pendientes.
+  static const success = Color(0xFF17784F);
+  static const successSoft = Color(0xFFE3F4EC);
   static const blue = Color(0xFF4E7FD0);
   static const pharmacyBlue = Color(0xFF003399);
   static const pharmacyBlueDeep = Color(0xFF003399);
@@ -3494,20 +3497,21 @@ extension DeliveryKindX on DeliveryKind {
 extension PaymentMethodX on PaymentMethod {
   String get label => switch (this) {
     PaymentMethod.cash => 'Efectivo',
-    PaymentMethod.card => 'Tarjeta',
-    PaymentMethod.qr => 'QR',
+    // Regla farmanorte: tarjeta y QR se cobran con el datáfono.
+    PaymentMethod.card => 'Datáfono',
+    PaymentMethod.qr => 'Datáfono',
   };
 
   IconData get icon => switch (this) {
     PaymentMethod.cash => Icons.payments_outlined,
-    PaymentMethod.card => Icons.credit_card_outlined,
-    PaymentMethod.qr => Icons.qr_code_2_rounded,
+    PaymentMethod.card => Icons.point_of_sale_outlined,
+    PaymentMethod.qr => Icons.point_of_sale_outlined,
   };
 
   Color get color => switch (this) {
-    PaymentMethod.cash => AppColors.warning,
-    PaymentMethod.card => AppColors.blue,
-    PaymentMethod.qr => AppColors.violet,
+    PaymentMethod.cash => AppColors.primaryDark,
+    PaymentMethod.card => AppColors.primary,
+    PaymentMethod.qr => AppColors.primary,
   };
 }
 
@@ -4892,7 +4896,7 @@ class FarmaNorteApp extends StatelessWidget {
           ),
           enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(16),
-            borderSide: BorderSide.none,
+            borderSide: const BorderSide(color: AppColors.line),
           ),
           focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(16),
@@ -4915,6 +4919,47 @@ class FarmaNorteApp extends StatelessWidget {
               fontWeight: FontWeight.w800,
               fontSize: 15,
             ),
+          ),
+        ),
+        // Botón secundario: mismo radio que el principal, borde de marca.
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: AppColors.primary,
+            side: const BorderSide(color: AppColors.line),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(17),
+            ),
+            textStyle: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+        ),
+        textButtonTheme: TextButtonThemeData(
+          style: TextButton.styleFrom(
+            foregroundColor: AppColors.primary,
+            textStyle: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+        ),
+        snackBarTheme: SnackBarThemeData(
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: AppColors.ink,
+          contentTextStyle: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w600,
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+        ),
+        dialogTheme: DialogThemeData(
+          backgroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(22),
+          ),
+        ),
+        switchTheme: SwitchThemeData(
+          trackColor: WidgetStateProperty.resolveWith(
+            (states) => states.contains(WidgetState.selected)
+                ? AppColors.primary
+                : AppColors.line,
           ),
         ),
       ),
@@ -13550,8 +13595,8 @@ class _HomeTopBar extends StatelessWidget {
                   inBackground
                       ? 'En segundo plano'
                       : connected
-                      ? 'Estás conectado'
-                      : 'Estás desconectado',
+                      ? 'Conectado'
+                      : 'Desconectado',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -13562,10 +13607,10 @@ class _HomeTopBar extends StatelessWidget {
                 ),
                 Text(
                   inBackground
-                      ? 'Las alertas push siguen activas'
+                      ? 'Avisos activos'
                       : connected
-                      ? 'Recibiendo pedidos de tu zona'
-                      : 'Activa para recibir pedidos',
+                      ? 'Pedidos activos'
+                      : 'Actívate',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -13586,11 +13631,11 @@ class _HomeTopBar extends StatelessWidget {
           const SizedBox(width: 9),
           CircleAvatar(
             radius: 18,
-            backgroundColor: AppColors.ink,
+            backgroundColor: AppColors.mint,
             child: Text(
               _courierInitials(courierName),
               style: const TextStyle(
-                color: Colors.white,
+                color: AppColors.primary,
                 fontSize: 11,
                 fontWeight: FontWeight.w900,
               ),
@@ -14398,37 +14443,35 @@ class DeliveryListItem extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // El consecutivo (FN167009) es lo que se dicta y se busca:
+              // va primero y en azul; estado y tipo quedan debajo.
               Row(
                 children: [
                   Expanded(
-                    child: Wrap(
-                      spacing: 8,
-                      runSpacing: 5,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        _TypePill(
-                          kind: delivery.kind,
-                          service: delivery.service,
-                        ),
-                        _StatusPill(status: delivery.status),
-                        if (delivery.status != DeliveryStatus.offered)
-                          _AssignmentPill(support: delivery.assignedAsSupport),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  Flexible(
                     child: Text(
                       delivery.id,
-                      textAlign: TextAlign.right,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        color: AppColors.muted,
-                        fontSize: 10.5,
-                        fontWeight: FontWeight.w800,
+                        color: AppColors.primaryDark,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w900,
+                        fontFeatures: [FontFeature.tabularFigures()],
                       ),
                     ),
                   ),
+                  const SizedBox(width: 8),
+                  _StatusPill(status: delivery.status),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 5,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  _TypePill(kind: delivery.kind, service: delivery.service),
+                  if (delivery.status != DeliveryStatus.offered)
+                    _AssignmentPill(support: delivery.assignedAsSupport),
                 ],
               ),
               const SizedBox(height: 13),
@@ -14529,23 +14572,7 @@ class DeliveryListItem extends StatelessWidget {
                     label: 'Ganas ${_money(delivery.serviceFee)}',
                     color: AppColors.primaryDark,
                   ),
-                  if (!active)
-                    SizedBox(
-                      height: 37,
-                      child: FilledButton(
-                        onPressed: onPressed,
-                        style: FilledButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 15),
-                          minimumSize: Size.zero,
-                          textStyle: const TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w900,
-                          ),
-                        ),
-                        child: Text(overflow ? 'Tomar' : 'Aceptar'),
-                      ),
-                    )
-                  else
+                  if (active)
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -14598,6 +14625,20 @@ class DeliveryListItem extends StatelessWidget {
                     ),
                 ],
               ),
+              // Una sola acción grande por tarjeta, al alcance del pulgar
+              // (botón principal del tema: 54 px, radio 17).
+              if (!active) ...[
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: onPressed,
+                    child: Text(
+                      overflow ? 'Tomar domicilio' : 'Aceptar domicilio',
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -18356,16 +18397,20 @@ class _StatusPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Azul en curso, verde entregado, rojo no entregado (skill farmanorte).
     final color = switch (status) {
-      DeliveryStatus.delivered => AppColors.primaryDark,
-      DeliveryStatus.offered => AppColors.warning,
-      _ => AppColors.blue,
+      DeliveryStatus.delivered => AppColors.success,
+      DeliveryStatus.notDelivered => AppColors.danger,
+      DeliveryStatus.offered => AppColors.primary,
+      _ => AppColors.primaryDark,
     };
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: .1),
-        borderRadius: BorderRadius.circular(9),
+        color: status == DeliveryStatus.delivered
+            ? AppColors.successSoft
+            : color.withValues(alpha: .1),
+        borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
         status.label,

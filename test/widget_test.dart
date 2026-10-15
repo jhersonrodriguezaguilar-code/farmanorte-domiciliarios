@@ -178,7 +178,7 @@ void main() {
     expect(find.text('Resumen de tu conexión'), findsOneWidget);
     expect(find.text('Pedidos disponibles'), findsOneWidget);
     expect(find.text('Ganancias hoy'), findsOneWidget);
-    expect(tester.getTopLeft(find.text('Estás conectado')).dy, lessThan(100));
+    expect(tester.getTopLeft(find.text('Conectado')).dy, lessThan(100));
     expect(
       tester.getTopLeft(find.text('Resumen de tu conexión')).dy,
       lessThan(300),
@@ -203,7 +203,7 @@ void main() {
       await tester.tap(connectionSwitch);
       await tester.pumpAndSettle();
 
-      expect(find.text('Estás desconectado'), findsOneWidget);
+      expect(find.text('Desconectado'), findsOneWidget);
       expect(
         find.text(
           'Estás desconectado: los botones de aceptar están bloqueados.',
@@ -214,13 +214,16 @@ void main() {
       final homeList = find.byType(ListView).last;
       for (
         var attempt = 0;
-        attempt < 8 && find.text('Aceptar').evaluate().isEmpty;
+        attempt < 8 && find.text('Aceptar domicilio').evaluate().isEmpty;
         attempt++
       ) {
         await tester.drag(homeList, const Offset(0, -420));
         await tester.pump();
       }
-      final acceptButtons = find.widgetWithText(FilledButton, 'Aceptar');
+      final acceptButtons = find.widgetWithText(
+        FilledButton,
+        'Aceptar domicilio',
+      );
       expect(acceptButtons, findsWidgets);
       for (final element in acceptButtons.evaluate()) {
         expect((element.widget as FilledButton).onPressed, isNull);
@@ -392,7 +395,9 @@ void main() {
 
     await tester.drag(find.byType(ListView).last, const Offset(0, -520));
     await tester.pumpAndSettle();
-    final acceptButton = find.widgetWithText(FilledButton, 'Aceptar').first;
+    final acceptButton = find
+        .widgetWithText(FilledButton, 'Aceptar domicilio')
+        .first;
     await tester.tap(acceptButton);
     await tester.pumpAndSettle();
     expect(find.text('Detalle del domicilio'), findsOneWidget);
