@@ -1870,7 +1870,7 @@ class RealtimeOperationsService {
             : '${data['address'] ?? 'Dirección por confirmar'}',
         point: _latLngValue(data['point'], MapsConfig.monteria),
         label: isCross
-            ? 'Cruce: ${formatPharmacyCodeLabel(origin)} → ${formatPharmacyCodeLabel(destination)}'
+            ? 'Recoger en ${formatPharmacyCodeLabel(origin)} · entregar en ${formatPharmacyCodeLabel(destination)}'
             : '${data['label'] ?? 'Recoger'}',
       );
     }).toList();
@@ -12355,6 +12355,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       ? <Delivery>[]
       : StageZeroDemoStore.instance.deliveries.value.toList();
   StreamSubscription<List<Delivery>>? _remoteDeliveriesSubscription;
+  Timer? _offerRefreshTimer;
   final Map<String, DeliveryStatus> _remoteDeliveryStatuses = {};
   final Map<String, String?> _remoteAcceptedCouriers = {};
   final Map<String, String> _equivalentStatuses = {};
@@ -12432,6 +12433,25 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (!mounted) return;
       _publishPresence(_connected && !_appInBackground);
     });
+    // Prioridad de zona (migración 039): al terminar los 3 minutos de reserva
+    // la base no emite ningún cambio, así que la lista se vuelve a leer cada
+    // 30 s para que el apoyo vea la oferta liberada sin recargar la app.
+    _offerRefreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!mounted || _appInBackground) return;
+      if (!SupabaseConfig.isConfigured ||
+          !SupabaseOperationsService.instance.hasAuthenticatedUser) {
+        return;
+      }
+      unawaited(_reconnectOperations());
+    });
+  }
+
+  Future<void> _reconnectOperations() async {
+    final previous = _remoteDeliveriesSubscription;
+    _remoteDeliveriesSubscription = null;
+    await previous?.cancel();
+    if (!mounted) return;
+    await _connectToOperations();
   }
 
   @override
@@ -12442,6 +12462,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _onLocalDeliveriesChanged,
     );
     unawaited(_remoteDeliveriesSubscription?.cancel());
+    _offerRefreshTimer?.cancel();
     _presenceHeartbeat?.cancel();
     _publishPresence(false);
     super.dispose();

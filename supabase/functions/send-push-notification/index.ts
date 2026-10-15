@@ -49,7 +49,23 @@ type DeliveryRow = {
   service_type: string | null;
   status: string;
   accepted_courier_id: string | null;
+  // Migración 039: hasta esta hora la oferta es solo para la zona.
+  priority_until?: string | null;
 };
+
+type PushEvent =
+  | 'delivery_created'
+  | 'delivery_assigned'
+  | 'delivery_support_release'
+  | 'chat_message';
+
+// Quién recibe un domicilio nuevo: la zona del recorrido durante la reserva y
+// los apoyos cuando la reserva termina.
+type CourierAudience = 'zone' | 'support' | 'all';
+
+const priorityActive = (delivery: DeliveryRow) =>
+  Boolean(delivery.priority_until) &&
+  new Date(String(delivery.priority_until)).getTime() > Date.now();
 
 type PushTokenRow = {
   id: string;
@@ -176,14 +192,22 @@ const firebaseAccessToken = async (account: ServiceAccount) => {
   return token.access_token;
 };
 
+const deliveryColumns =
+  'id, public_code, pharmacy_code, zone_id, pickup_stops, destination_options, service_type, status, accepted_courier_id';
+
 const readDelivery = async (adminClient: AdminClient, deliveryId: string) => {
-  const { data, error } = await adminClient
+  const read = (columns: string) => adminClient
     .from('deliveries')
-    .select('id, public_code, pharmacy_code, zone_id, pickup_stops, destination_options, service_type, status, accepted_courier_id')
+    .select(columns)
     .eq('id', deliveryId)
     .maybeSingle();
-  if (error) throw new Error(`No se pudo leer el domicilio: ${error.message}`);
-  return data as DeliveryRow | null;
+  // priority_until llega con la migración 039; sin ella se lee como antes.
+  let result = await read(`${deliveryColumns}, priority_until`);
+  if (result.error && /priority_until/.test(result.error.message)) {
+    result = await read(deliveryColumns);
+  }
+  if (result.error) throw new Error(`No se pudo leer el domicilio: ${result.error.message}`);
+  return result.data as unknown as DeliveryRow | null;
 };
 
 const deliveryRoutePharmacyCodes = (delivery: DeliveryRow) => {
@@ -215,6 +239,7 @@ const deliveryRoutePharmacyCodes = (delivery: DeliveryRow) => {
 const eligibleCourierIds = async (
   adminClient: AdminClient,
   delivery: DeliveryRow,
+  audience: CourierAudience = 'all',
 ) => {
   const pharmacyCodes = deliveryRoutePharmacyCodes(delivery);
   const routeZoneIds = new Set<string>();
@@ -239,9 +264,17 @@ const eligibleCourierIds = async (
   if (error) throw new Error(`No se pudieron leer los turnos: ${error.message}`);
   const courierIds = new Set<string>();
   for (const row of data ?? []) {
-    if (row.assignment_type === 'support' || (row.zone_id && routeZoneIds.has(String(row.zone_id)))) {
-      if (row.courier_id) courierIds.add(String(row.courier_id));
-    }
+    const isSupport = row.assignment_type === 'support';
+    // Apoyo general (sin zona) o apoyo de una zona del recorrido.
+    const supportCovers = isSupport &&
+      (!row.zone_id || routeZoneIds.has(String(row.zone_id)));
+    const zoneCovers = !isSupport && row.zone_id && routeZoneIds.has(String(row.zone_id));
+    const include = audience === 'zone'
+      ? zoneCovers
+      : audience === 'support'
+      ? supportCovers
+      : zoneCovers || supportCovers;
+    if (include && row.courier_id) courierIds.add(String(row.courier_id));
   }
   if (courierIds.size === 0) return [];
 
@@ -263,7 +296,7 @@ const targetUserIds = async ({
   actorId,
 }: {
   adminClient: AdminClient;
-  event: 'delivery_created' | 'delivery_assigned' | 'chat_message';
+  event: PushEvent;
   delivery: DeliveryRow;
   message: Record<string, unknown> | null;
   actorId: string;
@@ -271,7 +304,14 @@ const targetUserIds = async ({
   const targetIds = new Set<string>();
 
   if (event === 'delivery_created') {
-    const courierIds = await eligibleCourierIds(adminClient, delivery);
+    const courierIds = await eligibleCourierIds(
+      adminClient,
+      delivery,
+      priorityActive(delivery) ? 'zone' : 'all',
+    );
+    courierIds.forEach((id) => targetIds.add(id));
+  } else if (event === 'delivery_support_release') {
+    const courierIds = await eligibleCourierIds(adminClient, delivery, 'support');
     courierIds.forEach((id) => targetIds.add(id));
   } else if (event === 'delivery_assigned') {
     if (delivery.accepted_courier_id) targetIds.add(delivery.accepted_courier_id);
@@ -479,11 +519,13 @@ Deno.serve(async (request) => {
     return json({ error: 'El cuerpo de la solicitud no es válido.' }, 400);
   }
 
-  const event = body.event === 'chat_message'
+  const event: PushEvent = body.event === 'chat_message'
     ? 'chat_message'
     : body.event === 'delivery_assigned'
       ? 'delivery_assigned'
-      : 'delivery_created';
+      : body.event === 'delivery_support_release'
+        ? 'delivery_support_release'
+        : 'delivery_created';
   const deliveryId = String(body.delivery_id ?? '').trim();
   if (!deliveryId) return json({ error: 'Falta delivery_id.' }, 400);
 
@@ -496,6 +538,35 @@ Deno.serve(async (request) => {
       (actor.role === 'pharmacy' && actor.pharmacy_code === delivery.pharmacy_code);
     if (!allowed) return json({ error: 'No puedes notificar este domicilio.' }, 403);
     if (delivery.status !== 'offered') return json({ ok: true, sent: 0, skipped: 'not_offered' });
+    if (!priorityActive(delivery)) {
+      // Sin reserva de zona el primer aviso ya incluye a los apoyos.
+      await adminClient
+        .from('deliveries')
+        .update({ support_notified_at: new Date().toISOString() })
+        .eq('id', delivery.id)
+        .is('support_notified_at', null);
+    }
+  } else if (event === 'delivery_support_release') {
+    const allowed = actor.role === 'admin' ||
+      (actor.role === 'pharmacy' && actor.pharmacy_code === delivery.pharmacy_code);
+    if (!allowed) return json({ error: 'No puedes notificar este domicilio.' }, 403);
+    if (delivery.status !== 'offered' || delivery.accepted_courier_id) {
+      return json({ ok: true, sent: 0, skipped: 'not_offered' });
+    }
+    if (priorityActive(delivery)) {
+      return json({ ok: true, sent: 0, skipped: 'zone_priority_active' });
+    }
+    // Solo la primera solicitud envía el aviso a los apoyos.
+    const { data: claimed, error: claimError } = await adminClient
+      .from('deliveries')
+      .update({ support_notified_at: new Date().toISOString() })
+      .eq('id', delivery.id)
+      .is('support_notified_at', null)
+      .select('id');
+    if (claimError) return json({ error: `No se pudo registrar el aviso: ${claimError.message}` }, 500);
+    if (!claimed || claimed.length === 0) {
+      return json({ ok: true, sent: 0, skipped: 'already_notified' });
+    }
   } else if (event === 'delivery_assigned') {
     const allowed = actor.role === 'admin' ||
       (actor.role === 'pharmacy' && actor.pharmacy_code === delivery.pharmacy_code);
@@ -556,11 +627,14 @@ Deno.serve(async (request) => {
 
   const isChat = event === 'chat_message';
   const isAssignment = event === 'delivery_assigned';
+  const isSupportRelease = event === 'delivery_support_release';
   const title = isChat
     ? 'Nuevo mensaje en el domicilio'
     : isAssignment
       ? 'Nuevo domicilio asignado'
-      : 'Nuevo domicilio disponible';
+      : isSupportRelease
+        ? 'Domicilio disponible para apoyo'
+        : 'Nuevo domicilio disponible';
   const compactCode = (delivery.public_code ?? '').replace(/[\s_-]+/g, '').toUpperCase();
   const pharmacyLabel = `farmanorte ${delivery.pharmacy_code}`;
   const codeLabel = [compactCode, pharmacyLabel].filter(Boolean).join(' · ');
