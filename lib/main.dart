@@ -24,6 +24,8 @@ import 'package:signature/signature.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import 'web_alert_audio.dart';
+
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
@@ -206,6 +208,14 @@ class AppNotificationAudio {
     _volume = (preferences.getDouble(_volumePreferenceKey) ?? .8)
         .clamp(.1, 1.0)
         .toDouble();
+    // PWA en iPhone: el primer toque en cualquier parte de la app habilita el
+    // audio, sin depender de un botón concreto.
+    if (kIsWeb && WebAlertAudio.supported) {
+      WebAlertAudio.installGestureUnlock(() {
+        _webAudioUnlocked = true;
+        webAudioReady.value = true;
+      });
+    }
   }
 
   static Future<void> selectSound(String id) async {
@@ -235,24 +245,43 @@ class AppNotificationAudio {
   }
 
   static bool _webAudioUnlocked = false;
+  static final ValueNotifier<bool> webAudioReady = ValueNotifier<bool>(false);
 
   /// iPhone bloquea el audio de la PWA hasta que suene algo dentro de un
   /// toque. Se llama al iniciar sesión y al tocar "Activar" para que las
   /// alertas con la app abierta suenen después.
-  static void unlockForWeb() {
-    if (!kIsWeb || _webAudioUnlocked) return;
-    _webAudioUnlocked = true;
-    unawaited(() async {
-      try {
-        await _player.play(AssetSource(selectedSound.assetPath), volume: 0);
-        await _player.stop();
-      } catch (_) {
-        _webAudioUnlocked = false;
-      }
-    }());
+  static Future<bool> unlockForWeb() async {
+    if (!kIsWeb) return true;
+    if (_webAudioUnlocked) return true;
+    if (WebAlertAudio.supported) {
+      // Sin ningún await antes: Safari exige que nazca del toque.
+      final ok = WebAlertAudio.unlockNow(selectedSound.assetPath);
+      _webAudioUnlocked = ok;
+      webAudioReady.value = ok;
+      return ok;
+    }
+    try {
+      // El primer play se inicia antes de cualquier await: Safari solo acepta
+      // audio si nace directamente del toque del usuario. Un volumen mínimo
+      // evita un sonido perceptible, pero sí desbloquea el motor de audio.
+      final playback = _player.play(
+        AssetSource(selectedSound.assetPath),
+        volume: .01,
+      );
+      await playback;
+      await _player.stop();
+      _webAudioUnlocked = true;
+      webAudioReady.value = true;
+      return true;
+    } catch (_) {
+      _webAudioUnlocked = false;
+      webAudioReady.value = false;
+      return false;
+    }
   }
 
-  static Future<void> playDeliveryAlert() => _play(selectedSound.assetPath);
+  static Future<void> playDeliveryAlert() =>
+      _play(selectedSound.assetPath, repeat: 2);
 
   static Future<void> playMessageAlert() => _play(messageSound.assetPath);
 
@@ -268,8 +297,14 @@ class AppNotificationAudio {
     String assetPath, {
     bool vibrate = true,
     bool force = false,
+    int repeat = 1,
   }) async {
     if (!_enabled && !force) return;
+    // PWA: un solo <audio> habilitado por toque (ver WebAlertAudio).
+    if (kIsWeb && WebAlertAudio.supported) {
+      await WebAlertAudio.play(assetPath, repeat: repeat);
+      return;
+    }
     try {
       await _player.stop();
       await _player.setVolume(_volume);
@@ -724,7 +759,7 @@ class BackgroundNotificationService {
   /// el permiso del navegador, que iPhone solo muestra tras un toque.
   static Future<bool> enableFromUserTap() async {
     if (!kIsWeb) return openNotificationSettings();
-    AppNotificationAudio.unlockForWeb();
+    await AppNotificationAudio.unlockForWeb();
     if (!FirebaseConfig.messagingConfigured ||
         FirebaseConfig.webVapidKey.trim().isEmpty) {
       return false;
@@ -972,6 +1007,24 @@ class BackgroundNotificationService {
     RemoteMessage message, {
     bool foreground = true,
   }) async {
+    // PWA abierta (iPhone/Safari): no hay canal de notificación que suene, así
+    // que la alerta la reproduce la app. Va antes de cualquier otra espera y
+    // solo una vez por domicilio o mensaje.
+    if (kIsWeb && foreground) {
+      final webData = <String, dynamic>{...message.data};
+      final webKind = _kindFromData(webData);
+      final webDeliveryId = _dataText(webData, 'delivery_id');
+      final webKey = webKind == PushAlertKind.chat
+          ? 'chat:${_dataText(webData, 'message_id').isEmpty ? message.messageId ?? webDeliveryId : _dataText(webData, 'message_id')}'
+          : 'delivery:${webKind.name}:$webDeliveryId';
+      if (webDeliveryId.isEmpty || AppNotificationAudio.claimAlert(webKey)) {
+        unawaited(
+          webKind == PushAlertKind.chat
+              ? AppNotificationAudio.playMessageAlert()
+              : AppNotificationAudio.playDeliveryAlert(),
+        );
+      }
+    }
     if (!await initialize(listenForMessages: false)) return;
     final data = <String, dynamic>{...message.data};
     final kind = _kindFromData(data);
@@ -1198,16 +1251,23 @@ class _NotificationPermissionBannerState
             valueListenable: BackgroundNotificationService.permissionStatus,
             child: widget.child,
             builder: (context, status, child) {
+              final audioNeedsUnlock =
+                  isWebPush &&
+                  status == NotificationPermissionStatus.granted &&
+                  !AppNotificationAudio.webAudioReady.value;
               final visible =
                   !_dismissed &&
-                  (isAndroidApp
-                      ? status == NotificationPermissionStatus.denied
-                      : status != NotificationPermissionStatus.granted);
+                  (audioNeedsUnlock ||
+                      (isAndroidApp
+                          ? status == NotificationPermissionStatus.denied
+                          : status != NotificationPermissionStatus.granted));
               if (!visible) return child!;
               // En la PWA, iPhone solo admite push si se abre desde el ícono de la
               // pantalla de inicio; en ese caso se explica cómo instalarla.
               final needsInstall = isWebPush && !webSupported;
-              final message = needsInstall
+              final message = audioNeedsUnlock
+                  ? 'Toca Activar sonido para que las alertas con la PWA abierta puedan sonar en este iPhone.'
+                  : needsInstall
                   ? (isIphone
                         ? 'Para recibir avisos en iPhone: toca Compartir → Agregar '
                               'a pantalla de inicio y abre farmanorte desde ese ícono.'
@@ -1225,6 +1285,7 @@ class _NotificationPermissionBannerState
                   : 'Las notificaciones están desactivadas. Actívalas '
                         'para recibir domicilios nuevos y asignados.';
               final showAction =
+                  audioNeedsUnlock ||
                   isAndroidApp ||
                   (!needsInstall &&
                       status != NotificationPermissionStatus.denied);
@@ -1261,11 +1322,14 @@ class _NotificationPermissionBannerState
                                 style: TextButton.styleFrom(
                                   foregroundColor: Colors.white,
                                 ),
-                                onPressed: () => unawaited(
-                                  BackgroundNotificationService.enableFromUserTap(),
-                                ),
-                                child: const Text(
-                                  'Activar',
+                                onPressed: () async {
+                                  await BackgroundNotificationService.enableFromUserTap();
+                                  if (mounted) setState(() {});
+                                },
+                                child: Text(
+                                  audioNeedsUnlock
+                                      ? 'Activar sonido'
+                                      : 'Activar',
                                   style: TextStyle(fontWeight: FontWeight.w900),
                                 ),
                               ),
@@ -1726,11 +1790,13 @@ class RealtimeOperationsService {
   Future<void> publishCourierConnection({
     required String courierId,
     required bool connected,
+    String presenceState = 'foreground',
   }) async {
     if (!await initialize()) return;
     try {
       await _database!.ref('couriers/$courierId').update({
         'connected': connected,
+        'presenceState': presenceState,
         'updatedAt': ServerValue.timestamp,
       });
     } catch (_) {}
@@ -3207,6 +3273,33 @@ class SupabaseOperationsService {
     return result == true || '$result'.toLowerCase() == 'true';
   }
 
+  /// Quita la oferta solo de este domiciliario. El domicilio sigue publicado
+  /// para los demás elegibles y la reserva de zona se abre de inmediato.
+  Future<bool> declineDeliveryOffer({
+    required String deliveryId,
+    String reason = 'No puedo tomarlo',
+  }) async {
+    if (!await initialize() || !hasAuthenticatedUser) return false;
+    final result = await _client!.rpc(
+      'decline_delivery_offer',
+      params: {'requested_delivery_id': deliveryId, 'requested_reason': reason},
+    );
+    final declined = result == true || '$result'.toLowerCase() == 'true';
+    if (declined) {
+      unawaited(() async {
+        try {
+          await _client!.functions.invoke(
+            'send-push-notification',
+            body: {'event': 'delivery_released', 'delivery_id': deliveryId},
+          );
+        } catch (_) {
+          // La visibilidad se actualiza por Realtime aunque el push falle.
+        }
+      }());
+    }
+    return declined;
+  }
+
   /// Migración 042: devuelve un domicilio aceptado (sin recoger) para que se
   /// publique de nuevo, y avisa a los demás domiciliarios.
   Future<bool> releaseDelivery({
@@ -3237,6 +3330,7 @@ class SupabaseOperationsService {
   Future<void> publishCourierConnection({
     required String courierId,
     required bool connected,
+    String presenceState = 'foreground',
   }) async {
     if (!await initialize() || !hasAuthenticatedUser) return;
     try {
@@ -3244,6 +3338,7 @@ class SupabaseOperationsService {
       final payload = <String, dynamic>{
         'courier_id': _client!.auth.currentUser!.id,
         'connected': connected,
+        'presence_state': presenceState,
         'last_seen_at': now,
         'updated_at': now,
       };
@@ -3341,14 +3436,17 @@ class OperationsBackend {
   Future<void> publishCourierConnection({
     required String courierId,
     required bool connected,
+    String presenceState = 'foreground',
   }) => SupabaseConfig.isConfigured
       ? SupabaseOperationsService.instance.publishCourierConnection(
           courierId: courierId,
           connected: connected,
+          presenceState: presenceState,
         )
       : RealtimeOperationsService.instance.publishCourierConnection(
           courierId: courierId,
           connected: connected,
+          presenceState: presenceState,
         );
 
   Future<void> updateDeliveryStatus({
@@ -3525,6 +3623,16 @@ class OperationsBackend {
       ? SupabaseOperationsService.instance.acceptDelivery(
           deliveryId: deliveryId,
           asSupport: asSupport,
+        )
+      : Future.value(false);
+
+  Future<bool> declineDeliveryOffer({
+    required String deliveryId,
+    String reason = 'No puedo tomarlo',
+  }) => SupabaseConfig.isConfigured
+      ? SupabaseOperationsService.instance.declineDeliveryOffer(
+          deliveryId: deliveryId,
+          reason: reason,
         )
       : Future.value(false);
 
@@ -5505,7 +5613,7 @@ class _LoginScreenState extends State<LoginScreen>
 
   Future<void> _login() async {
     FocusManager.instance.primaryFocus?.unfocus();
-    AppNotificationAudio.unlockForWeb();
+    unawaited(AppNotificationAudio.unlockForWeb());
 
     if (!SupabaseConfig.isConfigured) {
       if (widget.allowLocalReview) {
@@ -12488,6 +12596,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _connected = true;
   bool _appInBackground = false;
   bool _autoAccepting = false;
+  bool _decliningDelivery = false;
   Timer? _presenceHeartbeat;
   List<AdminShift> _courierShifts = const [];
   DateTime _courierWeekStart = adminPublishWeekStart(_adminToday());
@@ -12556,7 +12665,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _publishPresence(true);
     _presenceHeartbeat = Timer.periodic(const Duration(seconds: 45), (_) {
       if (!mounted) return;
-      _publishPresence(_connected && !_appInBackground);
+      // Un cliente en segundo plano sigue conectado mientras su último
+      // latido sea reciente. La base aplica una ventana más amplia para ese
+      // estado y evita que la farmacia lo marque como "Programado" de
+      // inmediato.
+      _publishPresence(_connected, inBackground: _appInBackground);
     });
     // Prioridad de zona (migración 039): al terminar los 3 minutos de reserva
     // la base no emite ningún cambio, así que la lista se vuelve a leer cada
@@ -12601,19 +12714,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         state == AppLifecycleState.detached;
     if (_appInBackground == isBackground) return;
     if (mounted) setState(() => _appInBackground = isBackground);
-    // The push token continues working while the app is in the background;
-    // the presence row is marked paused so the pharmacy sees the real state.
-    _publishPresence(!isBackground && _connected);
+    // Pasar a segundo plano no equivale a cerrar sesión. Se conserva la
+    // conexión y se registra el estado para que la farmacia siga mostrando el
+    // punto verde mientras el último latido siga vigente.
+    _publishPresence(_connected, inBackground: isBackground);
     if (!isBackground && _autoAccepting) {
       unawaited(_autoAcceptBaseOffers());
     }
   }
 
-  void _publishPresence(bool connected) {
+  void _publishPresence(bool connected, {bool inBackground = false}) {
     unawaited(
       OperationsBackend.instance.publishCourierConnection(
         courierId: _courierId,
         connected: connected,
+        presenceState: connected
+            ? (inBackground ? 'background' : 'foreground')
+            : 'offline',
       ),
     );
   }
@@ -12664,6 +12781,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
+  bool _isVisibleToCourier(Delivery delivery) {
+    // Las ofertas publicadas siguen siendo candidatas para este dispositivo.
+    // En cuanto alguien las acepta, solo el domiciliario ganador conserva el
+    // domicilio en su lista. Esto protege también contra una actualización
+    // Realtime que llegue antes de que RLS retire la fila del otro cliente.
+    if (delivery.status == DeliveryStatus.offered) return true;
+    return delivery.acceptedCourierId == _courierId;
+  }
+
   Future<void> _connectToOperations() async {
     final stream = await OperationsBackend.instance.watchDeliveries();
     if (!mounted || stream == null) return;
@@ -12711,7 +12837,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
         );
       _remoteDeliveryBaselineReady = true;
-      setState(() => _deliveries = remoteDeliveries);
+      final visibleRemoteDeliveries = remoteDeliveries
+          .where(_isVisibleToCourier)
+          .toList();
+      setState(() => _deliveries = visibleRemoteDeliveries);
       unawaited(_consumePendingNotification());
       unawaited(_loadCourierEquivalentStatuses());
       unawaited(_loadCourierPharmacyBreakdown());
@@ -12892,8 +13021,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<Delivery> get _active => _deliveries
       .where(
         (item) =>
-            item.status == DeliveryStatus.accepted ||
-            item.status == DeliveryStatus.pickedUp,
+            (item.status == DeliveryStatus.accepted ||
+                item.status == DeliveryStatus.pickedUp) &&
+            item.acceptedCourierId == _courierId,
       )
       .toList();
 
@@ -12904,8 +13034,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   List<Delivery> get _completedDeliveries => _deliveries
       .where(
         (item) =>
-            item.status == DeliveryStatus.delivered ||
-            item.status == DeliveryStatus.notDelivered,
+            (item.status == DeliveryStatus.delivered ||
+                item.status == DeliveryStatus.notDelivered) &&
+            item.acceptedCourierId == _courierId,
       )
       .toList();
 
@@ -12920,6 +13051,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       .where(
         (item) =>
             item.status == DeliveryStatus.delivered &&
+            item.acceptedCourierId == _courierId &&
             _equivalentReleased(item),
       )
       .fold(0.0, (total, item) => total + item.serviceFee);
@@ -12949,7 +13081,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       _connected = connected;
       if (!connected) _autoAccepting = false;
     });
-    _publishPresence(connected && !_appInBackground);
+    _publishPresence(connected, inBackground: _appInBackground);
   }
 
   void _setAutoAccepting(bool enabled) {
@@ -13135,6 +13267,82 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             DeliveryDetailScreen(delivery: next, onChanged: _replace),
       ),
     );
+  }
+
+  Future<void> _decline(Delivery item) async {
+    if (!mounted || item.status != DeliveryStatus.offered) return;
+    const reasons = [
+      'Estoy ocupado',
+      'No alcanzo a llegar a tiempo',
+      'Problema con la moto o el vehículo',
+      'Otro motivo',
+    ];
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: const Text('No puedo tomarlo'),
+        children: [
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 24),
+            child: Text(
+              'El domicilio seguirá publicado para otro domiciliario. '
+              'Selecciona un motivo:',
+            ),
+          ),
+          const SizedBox(height: 8),
+          for (final option in reasons)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(dialogContext, option),
+              child: Text(
+                option,
+                style: const TextStyle(fontWeight: FontWeight.w700),
+              ),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Volver'),
+          ),
+        ],
+      ),
+    );
+    if (reason == null || !mounted) return;
+    if (_decliningDelivery) return;
+    setState(() => _decliningDelivery = true);
+    try {
+      final declined = await OperationsBackend.instance.declineDeliveryOffer(
+        deliveryId: item.id,
+        reason: reason,
+      );
+      if (!mounted) return;
+      if (!declined) {
+        throw StateError('El domicilio ya no está disponible para rechazarlo.');
+      }
+      setState(
+        () => _deliveries.removeWhere((delivery) => delivery.id == item.id),
+      );
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Quitaste el domicilio de tu lista. Ya está disponible para otros.',
+            ),
+          ),
+        );
+    } catch (error) {
+      if (!mounted) return;
+      final detail = '$error'
+          .replaceFirst('PostgrestException(message: ', '')
+          .split(', code:')
+          .first
+          .replaceFirst('Exception: ', '')
+          .trim();
+      ScaffoldMessenger.of(context)
+        ..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('No se pudo quitar: $detail')));
+    } finally {
+      if (mounted) setState(() => _decliningDelivery = false);
+    }
   }
 
   void _openShiftSchedule() {
@@ -13692,7 +13900,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             const SizedBox(height: 10),
             Expanded(
               child: _HomeSheet(
-                connected: _connected && !_appInBackground,
+                connected: _connected,
                 baseLabel: _baseLabel,
                 autoAccepting: _autoAccepting,
                 available: _available,
@@ -13703,6 +13911,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 loadingFeeSummary: _loadingFeeSummary,
                 onAutoAccept: _setAutoAccepting,
                 onAccept: _accept,
+                onDecline: _decline,
                 onDetail: (item) {
                   unawaited(_openDeliveryDetail(item));
                 },
@@ -13844,6 +14053,7 @@ class _HomeSheet extends StatelessWidget {
     required this.pendingApprovals,
     required this.onAutoAccept,
     required this.onAccept,
+    required this.onDecline,
     required this.onDetail,
     required this.onChat,
     required this.earnings,
@@ -13864,6 +14074,7 @@ class _HomeSheet extends StatelessWidget {
   final List<Delivery> pendingApprovals;
   final ValueChanged<bool> onAutoAccept;
   final ValueChanged<Delivery> onAccept;
+  final ValueChanged<Delivery> onDecline;
   final ValueChanged<Delivery> onDetail;
   final ValueChanged<Delivery> onChat;
   final double earnings;
@@ -14206,6 +14417,7 @@ class _HomeSheet extends StatelessWidget {
               child: DeliveryListItem(
                 delivery: item,
                 onPressed: connected ? () => onAccept(item) : null,
+                onDecline: connected ? () => onDecline(item) : null,
               ),
             ),
           ),
@@ -14606,6 +14818,7 @@ class DeliveryListItem extends StatelessWidget {
     required this.delivery,
     required this.onPressed,
     this.onChat,
+    this.onDecline,
     this.compact = false,
     super.key,
   });
@@ -14613,6 +14826,7 @@ class DeliveryListItem extends StatelessWidget {
   final Delivery delivery;
   final VoidCallback? onPressed;
   final VoidCallback? onChat;
+  final VoidCallback? onDecline;
   final bool compact;
 
   @override
@@ -14828,6 +15042,24 @@ class DeliveryListItem extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (onDecline != null) ...[
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: onDecline,
+                      icon: const Icon(Icons.close_rounded, size: 17),
+                      label: const Text('No puedo tomarlo'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: AppColors.danger,
+                        side: BorderSide(
+                          color: AppColors.danger.withValues(alpha: .35),
+                        ),
+                        minimumSize: const Size.fromHeight(44),
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ],
           ),
